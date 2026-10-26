@@ -23,7 +23,7 @@ class MetaLibraryWorker(BaseWorker):
                 # Meta 可能返回 403，但仍然把公开结果渲染在页面中，不能只看 HTTP 状态。
                 response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 await page.wait_for_timeout(int(payload.get("waitMs", 5000)))
-                items = await self._parse_cards(page, int(payload.get("maxResults", 20)))
+                items = await self._parse_cards(page, int(payload.get("maxResults", 20)), payload)
                 if items:
                     return WorkerResult(fetchedCount=len(items), newCount=len(items), items=items)
 
@@ -63,7 +63,7 @@ class MetaLibraryWorker(BaseWorker):
         return "https://www.facebook.com/ads/library/?" + urlencode(params)
 
     @staticmethod
-    async def _parse_cards(page, max_results: int) -> list[dict]:
+    async def _parse_cards(page, max_results: int, payload: dict) -> list[dict]:
         """读取语义文本和链接，避免依赖 Meta 会变化的随机 CSS class。"""
         cards = page.get_by_text("Library ID:", exact=False)
         items: list[dict] = []
