@@ -91,6 +91,7 @@ class GoogleTransparencyWorker(BaseWorker):
         advertiser_id = advertiser_match.group(1) if advertiser_match else None
         result: list[dict] = []
         media_items: list[dict] = []
+        seen_external_ids: set[str] = set()
         creatives = page.locator("creative")
         creative_links = page.locator("a[href*='/creative/']")
         creative_count = await creatives.count()
@@ -108,6 +109,10 @@ class GoogleTransparencyWorker(BaseWorker):
             if not creative_id:
                 # 预览脚本未加载时保留卡片序号，避免整批结果丢失。
                 creative_id = f"position-{index + 1}"
+            # Google 结果页使用虚拟列表时可能重复挂载同一张卡片，按平台素材 ID 去重。
+            if creative_id in seen_external_ids:
+                continue
+            seen_external_ids.add(creative_id)
             card_text = (await card.inner_text()).lower()
             # Google 的实际图片/视频不在 creative 自身，而在跨域 SafeFrame 的下一层 iframe。
             preview = await GoogleTransparencyWorker._extract_preview(card)
