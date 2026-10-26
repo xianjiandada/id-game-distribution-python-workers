@@ -36,13 +36,19 @@ Invoke-RestMethod http://127.0.0.1:8091/jobs -Method Post -ContentType 'applicat
 
 ## 两个平台快速烟测
 
-不启动 FastAPI 也可以直接执行固定查询词的小规模真实网页测试。脚本默认每个平台最多抓取 3 条，成功时退出码为 `0`，遇到验证码、页面变化或没有结果时会打印错误并返回非 `0`：
+不启动 FastAPI 也可以直接执行小规模真实网页测试。脚本默认使用 Meta“螺丝”和 Google `SOFISH TECHNOLOGY PTE. LTD.`，每个平台最多抓取 3 条；成功时退出码为 `0`，遇到验证码、页面变化或没有结果时会打印错误并返回非 `0`：
 
 ```powershell
 python scripts/live_smoke_test.py
 ```
 
-固定查询为 Meta 的“螺丝”（`country=ALL`）和 Google 的 `SOFISH TECHNOLOGY PTE. LTD.`（`region=SG`）。需要代理时，先配置逻辑 Profile，再传入 Profile 名称：
+也可以传入其他词语和竞品公司名称进行模拟：
+
+```powershell
+python scripts/live_smoke_test.py --meta-keyword "手机壳" --google-advertiser "Supercell Oy" --google-region HK --max-results 2
+```
+
+Meta 默认使用 `country=ALL`，Google 默认使用 `region=SG`。需要代理时，先配置逻辑 Profile，再传入 Profile 名称：
 
 ```powershell
 $env:PROXY_PROFILE_GOOGLE_HK = 'socks5://user:password@proxy.example:1080'
