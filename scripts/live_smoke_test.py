@@ -29,9 +29,11 @@ def _preview(item: dict[str, Any]) -> dict[str, Any]:
             "advertiserName",
             "format",
             "mediaType",
+            "mediaUrl",
             "landingUrl",
             "creativeUrl",
             "snapshotUrl",
+            "previewScriptUrl",
         )
         if item.get(key) is not None
     }
