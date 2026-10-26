@@ -104,6 +104,7 @@ async def _main(max_results: int, wait_ms: int, proxy_profile: str | None) -> in
 
 
 def main() -> int:
+    """解析烟测参数并把异步执行结果转换为进程退出码。"""
     parser = argparse.ArgumentParser(description="执行 Meta 和 Google 公开网页抓取小规模烟测")
     parser.add_argument("--max-results", type=int, default=3, help="每个平台最多抓取多少条，默认 3")
     parser.add_argument("--wait-ms", type=int, default=4000, help="页面等待时间，默认 4000 毫秒")

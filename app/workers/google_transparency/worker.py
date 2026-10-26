@@ -8,6 +8,8 @@ from ..base import BaseWorker
 
 
 class GoogleTransparencyWorker(BaseWorker):
+    """通过 Google Ads Transparency 公开页面搜索广告主并提取素材卡片。"""
+
     name = "google_transparency"
 
     async def run(self, payload: dict, proxy_url: str | None = None) -> WorkerResult:

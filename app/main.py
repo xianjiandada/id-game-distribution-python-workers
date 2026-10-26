@@ -14,6 +14,7 @@ from .workers.mock_worker import MockWorker
 
 
 def create_app() -> FastAPI:
+    """创建 FastAPI 应用并注册内置 Worker。"""
     app = FastAPI(title=settings.app_name, version="0.1.0")
     registry = WorkerRegistry()
     registry.register(MockWorker())
@@ -25,14 +26,17 @@ def create_app() -> FastAPI:
     @app.get("/health")
     @app.post("/health")
     async def health() -> dict:
+        """返回进程存活状态，供 Supervisor、宝塔或负载均衡检查。"""
         return {"status": "UP", "service": settings.app_name, "environment": settings.app_env}
 
     @app.get("/workers")
     async def workers() -> dict:
+        """列出当前进程已经注册的 Worker 名称。"""
         return {"workers": registry.names()}
 
     @app.post("/jobs", response_model=JobSubmitResponse, status_code=status.HTTP_202_ACCEPTED)
     async def submit_job(request: JobSubmitRequest) -> JobSubmitResponse:
+        """登记并异步派发任务，接口不会等待网页抓取完成。"""
         try:
             job = app.state.jobs.submit(request)
         except KeyError as exc:
@@ -43,6 +47,7 @@ def create_app() -> FastAPI:
 
     @app.get("/jobs/{job_id}")
     async def get_job(job_id: str):
+        """按 Python jobId 查询内存中的实时任务状态。"""
         job = app.state.jobs.get(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="job not found")

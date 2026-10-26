@@ -1,5 +1,7 @@
 import asyncio
 
+"""FastAPI 任务接口的离线测试，不访问真实 Meta 或 Google 页面。"""
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -12,10 +14,14 @@ from app.workers.base import BaseWorker
 
 
 class RecordingCallback(CallbackSender):
+    """记录回调内容，验证任务完成后确实触发 Java 回调替身。"""
+
     def __init__(self):
+        """创建一个只记录回调而不发网络请求的测试替身。"""
         self.payloads: list[CallbackPayload] = []
 
     async def send(self, payload: CallbackPayload, callback_url: str | None) -> None:
+        """把回调保存到列表，供断言检查。"""
         self.payloads.append(payload)
 
 
@@ -25,11 +31,13 @@ class ImmediateManualWorker(BaseWorker):
     name = "google_transparency"
 
     async def run(self, payload: dict, proxy_url: str | None = None) -> WorkerResult:
+        """立即返回人工介入状态，避免测试访问真实 Google 页面。"""
         return WorkerResult(status=JobStatus.WAITING_MANUAL, errorCode="TEST_MANUAL")
 
 
 @pytest.mark.asyncio
 async def test_mock_job_calls_java_callback_and_is_queryable():
+    """验证提交接口立即返回，并最终得到成功状态和素材数量。"""
     app = create_app()
     callback = RecordingCallback()
     app.state.jobs.callback = callback
@@ -49,6 +57,7 @@ async def test_mock_job_calls_java_callback_and_is_queryable():
 
 @pytest.mark.asyncio
 async def test_failure_and_waiting_manual_are_explicit():
+    """验证失败和人工介入状态不会被吞掉。"""
     app = create_app()
     app.state.registry._workers["google_transparency"] = ImmediateManualWorker()
     callback = RecordingCallback()
@@ -64,6 +73,7 @@ async def test_failure_and_waiting_manual_are_explicit():
 
 @pytest.mark.asyncio
 async def test_unknown_worker_is_rejected():
+    """验证未注册 Worker 会被接口拒绝。"""
     app = create_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/jobs", json={"worker": "unknown"})
@@ -72,6 +82,7 @@ async def test_unknown_worker_is_rejected():
 
 @pytest.mark.asyncio
 async def test_required_proxy_without_server_configuration_is_rejected():
+    """验证强制代理但未配置时返回 503。"""
     app = create_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(

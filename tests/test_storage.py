@@ -1,3 +1,5 @@
+"""SQLite 本地任务审计和素材幂等保存测试。"""
+
 import json
 
 from app.models import JobStatus, JobView
@@ -5,6 +7,7 @@ from app.storage import JobStore
 
 
 def test_job_store_persists_job_and_deduplicates_items(tmp_path):
+    """验证任务可保存，重复素材会更新快照而不是新增行。"""
     store = JobStore(str(tmp_path / "worker.db"))
     job = JobView(
         jobId="job-1",

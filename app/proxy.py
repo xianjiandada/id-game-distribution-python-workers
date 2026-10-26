@@ -12,10 +12,15 @@ class ProxyUnavailable(RuntimeError):
 
 @dataclass(frozen=True)
 class ProxyLease:
+    """一次任务解析出的代理租约，仅在 Worker 进程内存中保存。"""
+
+    # 逻辑 Profile 名称，用于排查，不包含敏感地址。
     profile: str
+    # 内部使用的完整代理地址，不能写入任务状态或日志。
     server: str
 
     def as_playwright_proxy(self) -> dict[str, str]:
+        """拆分代理主机、用户名和密码，生成 Playwright 所需结构。"""
         # 代理地址只在内存中使用，不写入任务状态、回调或日志，避免泄露认证信息。
         parsed = urlsplit(self.server)
         host = parsed.hostname or ""
@@ -34,9 +39,11 @@ class ProxyResolver:
     """把逻辑代理名称解析为服务器端代理地址。"""
 
     def __init__(self, settings: Settings) -> None:
+        """使用进程配置初始化代理解析器。"""
         self.settings = settings
 
     def resolve(self, profile: str | None, required: bool = False) -> ProxyLease | None:
+        """按逻辑名称读取环境变量并校验代理协议、主机和端口。"""
         if not profile and not required:
             return None
         normalized = re.sub(r"[^A-Za-z0-9]+", "_", profile or "default").upper()
@@ -50,6 +57,7 @@ class ProxyResolver:
 
     @staticmethod
     def _validate_server(server: str) -> None:
+        """拒绝不支持或明显非法的代理地址，避免浏览器收到错误配置。"""
         parsed = urlsplit(server)
         try:
             port = parsed.port

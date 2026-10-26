@@ -8,6 +8,8 @@ from ..base import BaseWorker
 
 
 class MetaLibraryWorker(BaseWorker):
+    """通过 Meta Ads Library 公开页面按关键词提取广告卡片。"""
+
     name = "meta_library"
 
     async def run(self, payload: dict, proxy_url: str | None = None) -> WorkerResult:
