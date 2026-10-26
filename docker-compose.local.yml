@@ -1,0 +1,26 @@
+services:
+  creative-mysql:
+    image: mysql:8.0
+    container_name: creative-worker-mysql
+    environment:
+      MYSQL_DATABASE: sdkgamedb0
+      MYSQL_USER: gamedis
+      MYSQL_PASSWORD: gamedis_local
+      MYSQL_ROOT_PASSWORD: root_local
+    ports:
+      - "53307:3306"
+    volumes:
+      - creative_mysql_data:/var/lib/mysql
+
+  creative-redis:
+    image: redis:7-alpine
+    container_name: creative-worker-redis
+    command: redis-server --requirepass redis_local
+    ports:
+      - "63790:6379"
+    volumes:
+      - creative_redis_data:/data
+
+volumes:
+  creative_mysql_data:
+  creative_redis_data:

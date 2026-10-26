@@ -1,0 +1,59 @@
+from dataclasses import dataclass
+import os
+import re
+from urllib.parse import urlsplit, unquote
+
+from .config import Settings
+
+
+class ProxyUnavailable(RuntimeError):
+    """任务要求代理但服务器没有可用配置时抛出。"""
+
+
+@dataclass(frozen=True)
+class ProxyLease:
+    profile: str
+    server: str
+
+    def as_playwright_proxy(self) -> dict[str, str]:
+        # 代理地址只在内存中使用，不写入任务状态、回调或日志，避免泄露认证信息。
+        parsed = urlsplit(self.server)
+        host = parsed.hostname or ""
+        server = f"{parsed.scheme}://{host}"
+        if parsed.port:
+            server += f":{parsed.port}"
+        result = {"server": server}
+        if parsed.username:
+            result["username"] = unquote(parsed.username)
+        if parsed.password:
+            result["password"] = unquote(parsed.password)
+        return result
+
+
+class ProxyResolver:
+    """把逻辑代理名称解析为服务器端代理地址。"""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def resolve(self, profile: str | None, required: bool = False) -> ProxyLease | None:
+        if not profile and not required:
+            return None
+        normalized = re.sub(r"[^A-Za-z0-9]+", "_", profile or "default").upper()
+        server = os.getenv(f"PROXY_PROFILE_{normalized}") or self.settings.proxy_default_url
+        if not server:
+            if required:
+                raise ProxyUnavailable(f"proxy profile is not configured: {profile or 'default'}")
+            return None
+        self._validate_server(server)
+        return ProxyLease(profile or "default", server)
+
+    @staticmethod
+    def _validate_server(server: str) -> None:
+        parsed = urlsplit(server)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ProxyUnavailable("proxy URL contains an invalid port") from exc
+        if parsed.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed.hostname or (port is not None and not 1 <= port <= 65535):
+            raise ProxyUnavailable("proxy URL must use http, https, socks5, or socks5h and include a host")
