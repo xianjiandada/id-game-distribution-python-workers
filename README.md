@@ -34,4 +34,19 @@ Invoke-RestMethod http://127.0.0.1:8091/jobs -Method Post -ContentType 'applicat
 } | ConvertTo-Json -Depth 8)
 ```
 
+## 两个平台快速烟测
+
+不启动 FastAPI 也可以直接执行固定查询词的小规模真实网页测试。脚本默认每个平台最多抓取 3 条，成功时退出码为 `0`，遇到验证码、页面变化或没有结果时会打印错误并返回非 `0`：
+
+```powershell
+python scripts/live_smoke_test.py
+```
+
+固定查询为 Meta 的“螺丝”（`country=ALL`）和 Google 的 `SOFISH TECHNOLOGY PTE. LTD.`（`region=SG`）。需要代理时，先配置逻辑 Profile，再传入 Profile 名称：
+
+```powershell
+$env:PROXY_PROFILE_GOOGLE_HK = 'socks5://user:password@proxy.example:1080'
+python scripts/live_smoke_test.py --max-results 3 --proxy-profile google_hk
+```
+
 更完整的架构、接口、开发和上线说明见 [`docs/`](D:/IDEAWorkSpace/learn/id-game-distribution-python-workers/docs/)。
