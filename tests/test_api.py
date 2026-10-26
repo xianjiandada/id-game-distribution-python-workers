@@ -56,6 +56,38 @@ async def test_mock_job_calls_java_callback_and_is_queryable():
 
 
 @pytest.mark.asyncio
+async def test_product_query_context_is_kept_in_callback_and_items():
+    """验证 appID、查询配置和搜索词会随素材回调保留，便于 Java 按产品和日期入库。"""
+    app = create_app()
+    callback = RecordingCallback()
+    app.state.jobs.callback = callback
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/jobs",
+            json={
+                "worker": "mock",
+                "runId": 100,
+                "payload": {
+                    "queryId": 20001,
+                    "appId": 1001,
+                    "productName": "示例产品",
+                    "keyword": "竞品A",
+                    "items": [{"externalAdId": "context-1"}],
+                },
+            },
+        )
+        assert response.status_code == 202
+        for _ in range(20):
+            if callback.payloads:
+                break
+            await asyncio.sleep(0.01)
+    assert callback.payloads[0].queryId == 20001
+    assert callback.payloads[0].appId == 1001
+    assert callback.payloads[0].productName == "示例产品"
+    assert callback.payloads[0].items[0]["keyword"] == "竞品A"
+
+
+@pytest.mark.asyncio
 async def test_failure_and_waiting_manual_are_explicit():
     """验证失败和人工介入状态不会被吞掉。"""
     app = create_app()

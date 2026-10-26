@@ -57,6 +57,19 @@ class JobView(BaseModel):
     worker: str
     status: JobStatus
     payload: dict[str, Any]
+    # 查询配置 ID，用于把一次抓取归属到具体的产品查询条件。
+    queryId: int | str | None = None
+    # 产品在 Java Manager 中的 appID；同一个 Worker 可以服务多个产品。
+    appId: int | str | None = None
+    # 产品名称快照，避免产品改名后历史运行记录无法识别。
+    productName: str | None = None
+    # 本次运行使用的搜索词或广告主名称快照。
+    keyword: str | None = None
+    # 统一平台来源快照，避免 Java 只能根据 Worker 名称猜来源。
+    source: str | None = None
+    # 固定的查询窗口，用于回调 Java 后按同一窗口重试和核对。
+    windowStart: datetime | None = None
+    windowEnd: datetime | None = None
     proxyProfile: str | None = None
     fetchedCount: int = 0
     newCount: int = 0
@@ -86,6 +99,18 @@ class CallbackPayload(BaseModel):
     jobId: str
     worker: str
     status: JobStatus
+    # 查询配置和产品维度，Java 入库后可以按产品、搜索词和日期统计。
+    queryId: int | str | None = None
+    appId: int | str | None = None
+    productName: str | None = None
+    keyword: str | None = None
+    source: str | None = None
+    # 采集日期和采集时间，分别用于按天汇总和精确审计。
+    collectionDate: str | None = None
+    collectedAt: datetime | None = None
+    # 查询窗口快照，重试时保持原窗口，避免日报边界漂移。
+    windowStart: datetime | None = None
+    windowEnd: datetime | None = None
     fetchedCount: int = 0
     newCount: int = 0
     updatedCount: int = 0

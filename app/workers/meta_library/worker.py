@@ -99,9 +99,18 @@ class MetaLibraryWorker(BaseWorker):
                 {
                     "source": "META_LIBRARY_WEB",
                     "externalAdId": external_id,
+                    "identityConfidence": "STABLE",
                     "advertiserName": advertiser,
                     "copyText": copy_text,
                     "startedText": started,
+                    "regions": payload.get("countryCodes") or [payload.get("country", "HK")],
+                    # Meta 页面字段可能随版本变化，保留有用的原始筛选和投放信息。
+                    "platformData": {
+                        "startedText": started,
+                        "activeStatus": payload.get("activeStatus", "active"),
+                        "adType": payload.get("adType", "all"),
+                        "mediaType": payload.get("mediaType", "all"),
+                    },
                     "advertiserUrl": hrefs[0] if hrefs else None,
                     "landingUrl": hrefs[1] if len(hrefs) > 1 else None,
                     "mediaUrl": media_urls[-1] if media_urls else None,

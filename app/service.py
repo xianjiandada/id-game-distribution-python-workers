@@ -1,6 +1,8 @@
 """任务提交、异步执行、超时和回调编排。"""
 
 import asyncio
+import hashlib
+import json
 from datetime import datetime
 from uuid import uuid4
 
@@ -39,6 +41,13 @@ class JobService:
             worker=request.worker,
             status=JobStatus.DISPATCHED,
             payload=request.payload,
+            queryId=request.payload.get("queryId"),
+            appId=request.payload.get("appId"),
+            productName=request.payload.get("productName"),
+            keyword=request.payload.get("keyword") or request.payload.get("advertiserName"),
+            source=("GOOGLE_TRANSPARENCY_WEB" if request.worker.startswith("google") else "META_LIBRARY_WEB"),
+            windowStart=request.payload.get("windowStart"),
+            windowEnd=request.payload.get("windowEnd"),
             proxyProfile=request.proxyProfile,
             acceptedAt=utc_now(),
         )
@@ -81,7 +90,18 @@ class JobService:
         job.fetchedCount = result.fetchedCount
         job.newCount = result.newCount
         job.updatedCount = result.updatedCount
-        job.items = result.items
+        # 统一给每条素材补齐查询上下文，平台 Worker 只负责平台字段解析。
+        job.items = []
+        for item in result.items:
+            normalized = dict(item)
+            normalized.setdefault("queryId", job.queryId)
+            normalized.setdefault("appId", job.appId)
+            normalized.setdefault("productName", job.productName)
+            normalized.setdefault("keyword", job.keyword)
+            normalized.setdefault("source", job.source)
+            # 内容指纹忽略产品和查询上下文，避免同一素材被不同搜索词发现时误判为内容更新。
+            normalized.setdefault("contentHash", _content_hash(normalized))
+            job.items.append(normalized)
         job.errorCode = result.errorCode
         job.errorMessage = result.errorMessage
 
@@ -92,6 +112,15 @@ class JobService:
             jobId=job.jobId,
             worker=job.worker,
             status=job.status,
+            queryId=job.queryId,
+            appId=job.appId,
+            productName=job.productName,
+            keyword=job.keyword,
+            source=job.source,
+            collectionDate=(job.finishedAt or utc_now()).date().isoformat(),
+            collectedAt=job.finishedAt or utc_now(),
+            windowStart=job.windowStart,
+            windowEnd=job.windowEnd,
             fetchedCount=job.fetchedCount,
             newCount=job.newCount,
             updatedCount=job.updatedCount,
@@ -104,3 +133,11 @@ class JobService:
         except Exception as exc:  # 回调失败不覆盖原始 Worker 结果
             job.errorCode = job.errorCode or "CALLBACK_FAILED"
             job.errorMessage = job.errorMessage or str(exc)[:500]
+
+
+def _content_hash(item: dict) -> str:
+    """根据平台素材字段生成稳定指纹，排除产品、查询和抓取时间等上下文。"""
+    ignored = {"queryId", "appId", "productName", "keyword", "source", "collectionDate", "collectedAt"}
+    content = {key: value for key, value in item.items() if key not in ignored}
+    encoded = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

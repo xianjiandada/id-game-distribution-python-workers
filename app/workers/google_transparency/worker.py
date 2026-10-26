@@ -107,9 +107,11 @@ class GoogleTransparencyWorker(BaseWorker):
             item = {
                 "source": "GOOGLE_TRANSPARENCY_WEB",
                 "externalAdId": creative_id,
+                "identityConfidence": "STABLE" if not creative_id.startswith("position-") else "DERIVED",
                 "advertiserId": advertiser_id,
                 "advertiserName": advertiser,
                 "region": region,
+                "regions": [region],
                 "format": "VIDEO" if is_video else "UNKNOWN",
                 "versionId": version_match.group(1) if version_match else None,
                 "cardLabel": label,
@@ -119,6 +121,12 @@ class GoogleTransparencyWorker(BaseWorker):
                 ),
                 "sourceUrl": page.url,
                 "previewScriptUrl": src,
+                # Google 的 versionId、卡片标签和预览脚本是平台专属字段，统一放入扩展 JSON。
+                "platformData": {
+                    "versionId": version_match.group(1) if version_match else None,
+                    "cardLabel": label,
+                    "previewScriptUrl": src,
+                },
             }
             result.append(item)
         return result

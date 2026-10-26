@@ -34,6 +34,14 @@ class JobStore:
                     job_id TEXT PRIMARY KEY,
                     -- Java 业务运行 ID，可为空以支持独立本地任务。
                     run_id TEXT,
+                    -- Java 侧素材查询配置 ID。
+                    query_id TEXT,
+                    -- 产品 appID，用于按产品区分素材。
+                    app_id TEXT,
+                    -- 产品名称快照。
+                    product_name TEXT,
+                    -- 本次运行的搜索词或广告主名称。
+                    keyword TEXT,
                     -- Worker 注册名称。
                     worker TEXT NOT NULL,
                     -- 任务当前状态。
@@ -65,6 +73,12 @@ class JobStore:
                     external_ad_id TEXT NOT NULL,
                     -- 最近一次保存该素材的 Python 任务 ID。
                     job_id TEXT NOT NULL,
+                    -- 产品 appID 快照。
+                    app_id TEXT,
+                    -- 查询配置 ID 快照。
+                    query_id TEXT,
+                    -- 搜索词快照。
+                    keyword TEXT,
                     -- 素材标准化 JSON 快照。
                     item_json TEXT NOT NULL,
                     -- 首次发现时间。
@@ -75,8 +89,51 @@ class JobStore:
                     PRIMARY KEY (source, external_ad_id),
                     FOREIGN KEY (job_id) REFERENCES worker_job(job_id)
                 );
+                -- worker_item_observation 保存每次运行看到素材的历史，支持按天判断新增和更新。
+                CREATE TABLE IF NOT EXISTS worker_item_observation (
+                    -- 观察记录自增主键。
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    -- 本次 Python 任务 ID。
+                    job_id TEXT NOT NULL,
+                    -- 平台来源。
+                    source TEXT NOT NULL,
+                    -- 平台侧素材 ID。
+                    external_ad_id TEXT NOT NULL,
+                    -- 产品 appID。
+                    app_id TEXT,
+                    -- 查询配置 ID。
+                    query_id TEXT,
+                    -- 本次采集日期（UTC）。
+                    collection_date TEXT NOT NULL,
+                    -- 本次观察时间。
+                    observed_at TEXT NOT NULL,
+                    -- 本次素材快照 JSON。
+                    item_json TEXT NOT NULL,
+                    FOREIGN KEY (job_id) REFERENCES worker_job(job_id),
+                    UNIQUE (job_id, source, external_ad_id)
+                );
                 """
             )
+            # 兼容升级前已经存在的 SQLite 审计库；新字段只做增量追加，不删除历史数据。
+            self._ensure_columns(connection, "worker_job", {
+                "query_id": "TEXT",
+                "app_id": "TEXT",
+                "product_name": "TEXT",
+                "keyword": "TEXT",
+            })
+            self._ensure_columns(connection, "worker_item", {
+                "app_id": "TEXT",
+                "query_id": "TEXT",
+                "keyword": "TEXT",
+            })
+
+    @staticmethod
+    def _ensure_columns(connection: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+        """为旧版本地数据库补齐新增列，避免用户必须删除 SQLite 文件才能升级。"""
+        existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+        for name, sql_type in columns.items():
+            if name not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
 
     def save_submitted(self, job: JobView) -> None:
         """保存刚接收的任务，支持同一 jobId 重试覆盖。"""
@@ -84,12 +141,16 @@ class JobStore:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO worker_job
-                (job_id, run_id, worker, status, payload_json, accepted_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (job_id, run_id, query_id, app_id, product_name, keyword, worker, status, payload_json, accepted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.jobId,
                     str(job.runId) if job.runId is not None else None,
+                    str(job.queryId) if job.queryId is not None else None,
+                    str(job.appId) if job.appId is not None else None,
+                    job.productName,
+                    job.keyword,
                     job.worker,
                     job.status.value,
                     json.dumps(job.payload, ensure_ascii=False),
@@ -124,11 +185,37 @@ class JobStore:
                     continue
                 connection.execute(
                     """
-                    INSERT INTO worker_item (source, external_ad_id, job_id, item_json)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO worker_item (source, external_ad_id, job_id, app_id, query_id, keyword, item_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(source, external_ad_id) DO UPDATE SET
-                        job_id=excluded.job_id, item_json=excluded.item_json,
+                        job_id=excluded.job_id, app_id=excluded.app_id, query_id=excluded.query_id,
+                        keyword=excluded.keyword, item_json=excluded.item_json,
                         last_seen_at=CURRENT_TIMESTAMP
                     """,
-                    (source, str(external_id), job.jobId, json.dumps(item, ensure_ascii=False)),
+                    (
+                        source,
+                        str(external_id),
+                        job.jobId,
+                        str(item.get("appId") or job.appId) if (item.get("appId") or job.appId) is not None else None,
+                        str(item.get("queryId") or job.queryId) if (item.get("queryId") or job.queryId) is not None else None,
+                        item.get("keyword") or job.keyword,
+                        json.dumps(item, ensure_ascii=False),
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO worker_item_observation
+                    (job_id, source, external_ad_id, app_id, query_id, collection_date, observed_at, item_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job.jobId,
+                        source,
+                        str(external_id),
+                        str(item.get("appId") or job.appId) if (item.get("appId") or job.appId) is not None else None,
+                        str(item.get("queryId") or job.queryId) if (item.get("queryId") or job.queryId) is not None else None,
+                        (job.finishedAt or job.acceptedAt).date().isoformat(),
+                        (job.finishedAt or job.acceptedAt).isoformat(),
+                        json.dumps(item, ensure_ascii=False),
+                    ),
                 )
