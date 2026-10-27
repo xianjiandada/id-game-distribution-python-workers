@@ -19,8 +19,10 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 Copy-Item .env.example .env
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8091
+python -m app
 ```
+
+`python -m app` 读取项目 `.env`，默认监听 `127.0.0.1:13371`，系统环境变量优先。Manager 回调地址为 `http://127.0.0.1:13367/internal/creative/runs`。Java 提交任务时指定的 `callbackUrl` 优先于 Worker 的默认回调配置。需要自动重载时，可运行 `uvicorn app.main:app --env-file .env --reload --host 127.0.0.1 --port 13371`。
 
 任务完成后，Python 会把运行审计和素材结果写入 `data/worker.db`；Java Manager 回调成功后再写入 Java 主库的 `creative_run` 和 `creative_item`。
 
@@ -29,7 +31,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8091
 提交一个 Mock 任务：
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8091/jobs -Method Post -ContentType 'application/json' -Body (@{
+Invoke-RestMethod http://127.0.0.1:13371/jobs -Method Post -ContentType 'application/json' -Body (@{
   worker = 'mock'
   runID = 10001
   payload = @{ items = @(@{ externalAdID = 'demo-1'; copyText = 'demo' }) }
