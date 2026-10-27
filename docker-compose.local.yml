@@ -1,3 +1,7 @@
+# 历史隔离环境示例：当前本地联调复用 Java 项目的测试 MySQL / Redis。
+# 常规验收不运行此文件，不用下列端口和账号覆盖 Java 配置。
+# 保留供明确需要独立沙箱时参考；不会自动迁移或清理已有数据卷。
+# 当前流程见 docs/本地验收.md。
 services:
   creative-mysql:
     image: mysql:8.0
