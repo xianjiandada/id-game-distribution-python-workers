@@ -24,7 +24,7 @@ python -m app
 
 `python -m app` 读取项目 `.env`，默认监听 `127.0.0.1:13371`，系统环境变量优先。Manager 回调地址为 `http://127.0.0.1:13367/internal/creative/runs`。Java 提交任务时指定的 `callbackUrl` 优先于 Worker 的默认回调配置。需要自动重载时，可运行 `uvicorn app.main:app --env-file .env --reload --host 127.0.0.1 --port 13371`。
 
-任务完成后，Python 会把运行审计和去重后的最新素材写入 `data/worker.db`，相同 `media + externalAdID` 只保留一条，不再复制逐次素材历史；Java Manager 回调成功后再写入 Java 主库的 `creative_run` 和 `creative_item`。
+任务完成后，Python 会把运行审计和去重后的最新素材写入 `data/worker.db`，相同 `media + externalAdID` 只保留一条，不再复制逐次素材历史；Java Manager 回调成功后再写入 Java 主库的 `advert_creative_run` 和 `advert_creative_item`。
 
 任务参数中的 `payload.maxResults` 用于控制每个搜索词的拉取数量：传入 `1000` 表示最多拉取 1000 条，传入 `0`、空值或不传表示不限制。不限数量时 Worker 会滚动公开结果页，直到页面不再加载新素材；平台未公开或需要验证的结果仍会返回人工处理状态。
 
