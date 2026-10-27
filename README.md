@@ -18,7 +18,7 @@
 
 ### 首次准备（Windows / IDEA 终端）
 
-先进入项目根目录（包含 `requirements.txt` 的目录）。使用 Python 3.10 或以上版本，建议 Python 3.11 / 3.12；下列命令不依赖 PowerShell 的虚拟环境激活权限。已有 `.venv` 时跳过创建，已有 `.env` 时保留原配置：
+先进入项目根目录（包含 `requirements.txt` 的目录）。使用 Python 3.10 或以上版本；你的宝塔 Python 3.14.4 可以使用，建议直接选它，若依赖安装异常再回退 Python 3.12。下列命令不依赖 PowerShell 的虚拟环境激活权限。已有 `.venv` 时跳过创建，已有 `.env` 时保留原配置：
 
 ```powershell
 python -m venv .venv
@@ -138,7 +138,7 @@ python scripts/live_smoke_test.py --max-results 3 --proxy-profile google_hk
 以下为文档约定目录下的关键配置：
 
 ```text
-Python 环境：独立的 Python 3.12 虚拟环境（不选宝塔 pyenv 3.7）
+Python 环境：独立的 Python 3.14.4 环境（不选宝塔 pyenv 3.7；异常时可用 3.12）
 启动方式：命令行启动
 启动用户：www
 项目路径：/data/opt/game/server/id-game-distribution-python-workers
