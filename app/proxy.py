@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import os
 import re
-from urllib.parse import urlsplit, unquote
+from urllib.parse import urlsplit
 
 from .config import Settings
 
@@ -18,21 +18,6 @@ class ProxyLease:
     profile: str
     # 内部使用的完整代理地址，不能写入任务状态或日志。
     server: str
-
-    def as_playwright_proxy(self) -> dict[str, str]:
-        """拆分代理主机、用户名和密码，生成 Playwright 所需结构。"""
-        # 代理地址只在内存中使用，不写入任务状态、回调或日志，避免泄露认证信息。
-        parsed = urlsplit(self.server)
-        host = parsed.hostname or ""
-        server = f"{parsed.scheme}://{host}"
-        if parsed.port:
-            server += f":{parsed.port}"
-        result = {"server": server}
-        if parsed.username:
-            result["username"] = unquote(parsed.username)
-        if parsed.password:
-            result["password"] = unquote(parsed.password)
-        return result
 
 
 class ProxyResolver:

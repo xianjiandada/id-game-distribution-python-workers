@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-from datetime import datetime
 from uuid import uuid4
 
 from .callback import CallbackSender
