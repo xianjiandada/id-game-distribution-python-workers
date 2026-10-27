@@ -51,11 +51,11 @@ class MetaLibraryWorker(BaseWorker):
         # 未传国家或地区时按全部地区查询，避免误回退到某个默认国家。
         country_codes = payload.get("countryCodes") or [payload.get("country") or "ALL"]
         params = {
-            "active_status": payload.get("activeStatus", "active"),
+            "activeStatus": payload.get("activeStatus", "active"),
             "ad_type": payload.get("adType", "all"),
             "country": country_codes[0],
             "is_targeted_country": "false",
-            "media_type": payload.get("mediaType", "all"),
+            "mediaType": payload.get("mediaType", "all"),
             "search_type": "keyword_unordered",
             "sort_data[mode]": "total_impressions",
             "sort_data[direction]": "desc",
@@ -100,8 +100,8 @@ class MetaLibraryWorker(BaseWorker):
             media_urls = [url for url in media_urls if url]
             items.append(
                 {
-                    "source": "META_LIBRARY_WEB",
-                    "externalAdId": external_id,
+                    "media": "META_LIBRARY_WEB",
+                    "externalAdID": external_id,
                     "identityConfidence": "STABLE",
                     "advertiserName": advertiser,
                     "copyText": copy_text,

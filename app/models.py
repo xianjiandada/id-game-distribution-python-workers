@@ -30,7 +30,7 @@ class JobSubmitRequest(BaseModel):
     # Worker 注册名，例如 meta_library 或 google_transparency。
     worker: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_\-]+$")
     # Java 侧业务运行 ID，用于回调地址和最终入库关联。
-    runId: int | str | None = None
+    runID: int | str | None = None
     # 平台专属参数，例如关键词、国家和最大抓取数量。
     payload: dict[str, Any] = Field(default_factory=dict)
     # 可选的任务级回调地址；生产建议使用服务端默认地址。
@@ -43,8 +43,8 @@ class JobSubmitRequest(BaseModel):
 
 class JobSubmitResponse(BaseModel):
     """任务接收接口的快速响应模型。"""
-    jobId: str
-    runId: int | str | None
+    jobID: str
+    runID: int | str | None
     worker: str
     status: JobStatus
     acceptedAt: datetime
@@ -52,21 +52,21 @@ class JobSubmitResponse(BaseModel):
 
 class JobView(BaseModel):
     """任务实时状态和抓取结果模型。"""
-    jobId: str
-    runId: int | str | None
+    jobID: str
+    runID: int | str | None
     worker: str
     status: JobStatus
     payload: dict[str, Any]
     # 查询配置 ID，用于把一次抓取归属到具体的产品查询条件。
-    queryId: int | str | None = None
+    queryID: int | str | None = None
     # 产品在 Java Manager 中的 appID；同一个 Worker 可以服务多个产品。
-    appId: int | str | None = None
+    appID: int | str | None = None
     # 产品名称快照，避免产品改名后历史运行记录无法识别。
     productName: str | None = None
     # 本次运行使用的搜索词或广告主名称快照。
     keyword: str | None = None
     # 统一平台来源快照，避免 Java 只能根据 Worker 名称猜来源。
-    source: str | None = None
+    media: str | None = None
     # 固定的查询窗口，用于回调 Java 后按同一窗口重试和核对。
     windowStart: datetime | None = None
     windowEnd: datetime | None = None
@@ -95,16 +95,16 @@ class WorkerResult(BaseModel):
 
 class CallbackPayload(BaseModel):
     """Python 回调 Java Manager 时使用的统一 JSON 契约。"""
-    runId: int | str | None
-    jobId: str
+    runID: int | str | None
+    jobID: str
     worker: str
     status: JobStatus
     # 查询配置和产品维度，Java 入库后可以按产品、搜索词和日期统计。
-    queryId: int | str | None = None
-    appId: int | str | None = None
+    queryID: int | str | None = None
+    appID: int | str | None = None
     productName: str | None = None
     keyword: str | None = None
-    source: str | None = None
+    media: str | None = None
     # 采集日期和采集时间，分别用于按天汇总和精确审计。
     collectionDate: str | None = None
     collectedAt: datetime | None = None

@@ -23,9 +23,9 @@ def _preview(item: dict[str, Any]) -> dict[str, Any]:
     return {
         key: item.get(key)
         for key in (
-            "source",
-            "externalAdId",
-            "advertiserId",
+            "media",
+            "externalAdID",
+            "advertiserID",
             "advertiserName",
             "format",
             "mediaType",

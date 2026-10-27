@@ -36,16 +36,16 @@ class JobService:
         proxy = self.proxy_resolver.resolve(request.proxyProfile, request.proxyRequired)
         job_id = uuid4().hex
         job = JobView(
-            jobId=job_id,
-            runId=request.runId,
+            jobID=job_id,
+            runID=request.runID,
             worker=request.worker,
             status=JobStatus.DISPATCHED,
             payload=request.payload,
-            queryId=request.payload.get("queryId"),
-            appId=request.payload.get("appId"),
+            queryID=request.payload.get("queryID"),
+            appID=request.payload.get("appID"),
             productName=request.payload.get("productName"),
             keyword=request.payload.get("keyword") or request.payload.get("advertiserName"),
-            source=("GOOGLE_TRANSPARENCY_WEB" if request.worker.startswith("google") else "META_LIBRARY_WEB"),
+            media=("GOOGLE_TRANSPARENCY_WEB" if request.worker.startswith("google") else "META_LIBRARY_WEB"),
             windowStart=request.payload.get("windowStart"),
             windowEnd=request.payload.get("windowEnd"),
             proxyProfile=request.proxyProfile,
@@ -94,11 +94,11 @@ class JobService:
         job.items = []
         for item in result.items:
             normalized = dict(item)
-            normalized.setdefault("queryId", job.queryId)
-            normalized.setdefault("appId", job.appId)
+            normalized.setdefault("queryID", job.queryID)
+            normalized.setdefault("appID", job.appID)
             normalized.setdefault("productName", job.productName)
             normalized.setdefault("keyword", job.keyword)
-            normalized.setdefault("source", job.source)
+            normalized.setdefault("media", job.media)
             # 内容指纹忽略产品和查询上下文，避免同一素材被不同搜索词发现时误判为内容更新。
             normalized.setdefault("contentHash", _content_hash(normalized))
             job.items.append(normalized)
@@ -108,15 +108,15 @@ class JobService:
     async def _callback(self, job: JobView) -> None:
         """组装回调契约并发送给 Java；回调失败不覆盖原始抓取状态。"""
         payload = CallbackPayload(
-            runId=job.runId,
-            jobId=job.jobId,
+            runID=job.runID,
+            jobID=job.jobID,
             worker=job.worker,
             status=job.status,
-            queryId=job.queryId,
-            appId=job.appId,
+            queryID=job.queryID,
+            appID=job.appID,
             productName=job.productName,
             keyword=job.keyword,
-            source=job.source,
+            media=job.media,
             collectionDate=(job.finishedAt or utc_now()).date().isoformat(),
             collectedAt=job.finishedAt or utc_now(),
             windowStart=job.windowStart,
@@ -129,7 +129,7 @@ class JobService:
             errorMessage=job.errorMessage,
         )
         try:
-            await self.callback.send(payload, self.callback_urls.get(job.jobId))
+            await self.callback.send(payload, self.callback_urls.get(job.jobID))
         except Exception as exc:  # 回调失败不覆盖原始 Worker 结果
             job.errorCode = job.errorCode or "CALLBACK_FAILED"
             job.errorMessage = job.errorMessage or str(exc)[:500]
@@ -137,7 +137,7 @@ class JobService:
 
 def _content_hash(item: dict) -> str:
     """根据平台素材字段生成稳定指纹，排除产品、查询和抓取时间等上下文。"""
-    ignored = {"queryId", "appId", "productName", "keyword", "source", "collectionDate", "collectedAt"}
+    ignored = {"queryID", "appID", "productName", "keyword", "media", "collectionDate", "collectedAt"}
     content = {key: value for key, value in item.items() if key not in ignored}
     encoded = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()

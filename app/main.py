@@ -43,12 +43,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ProxyUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        return JobSubmitResponse(jobId=job.jobId, runId=job.runId, worker=job.worker, status=job.status, acceptedAt=job.acceptedAt)
+        return JobSubmitResponse(jobID=job.jobID, runID=job.runID, worker=job.worker, status=job.status, acceptedAt=job.acceptedAt)
 
-    @app.get("/jobs/{job_id}")
-    async def get_job(job_id: str):
-        """按 Python jobId 查询内存中的实时任务状态。"""
-        job = app.state.jobs.get(job_id)
+    @app.get("/jobs/{jobID}")
+    async def get_job(jobID: str):
+        """按 Python jobID 查询内存中的实时任务状态。"""
+        job = app.state.jobs.get(jobID)
         if not job:
             raise HTTPException(status_code=404, detail="job not found")
         return job

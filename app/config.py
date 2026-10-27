@@ -23,7 +23,7 @@ class Settings:
     app_name: str = os.getenv("APP_NAME", "id-game-distribution-python-workers")
     # 当前运行环境，例如 local、staging 或 production。
     app_env: str = os.getenv("APP_ENV", "local")
-    # Java Manager 回调基础地址，不包含具体 runId。
+    # Java Manager 回调基础地址，不包含具体 runID。
     java_callback_base_url: str = os.getenv("JAVA_CALLBACK_BASE_URL", "")
     # Java 回调的 HTTP 超时时间，单位为秒。
     callback_timeout_seconds: int = _int_env("CALLBACK_TIMEOUT_SECONDS", 10)

@@ -136,10 +136,10 @@ class GoogleTransparencyWorker(BaseWorker):
                 "detectedPackageName": preview["packageName"],
             }
             item = {
-                "source": "GOOGLE_TRANSPARENCY_WEB",
-                "externalAdId": creative_id,
+                "media": "GOOGLE_TRANSPARENCY_WEB",
+                "externalAdID": creative_id,
                 "identityConfidence": "STABLE" if not creative_id.startswith("position-") else "DERIVED",
-                "advertiserId": advertiser_id,
+                "advertiserID": advertiser_id,
                 "advertiserName": advertiser,
                 "region": region,
                 "regions": [region],
@@ -209,7 +209,7 @@ class GoogleTransparencyWorker(BaseWorker):
 
     @staticmethod
     def _is_http_url(value: str | None) -> bool:
-        """只把 Java 媒体代理可以直接请求的 HTTP(S) 地址写入 media_url。"""
+        """只把 Java 媒体代理可以直接请求的 HTTP(S) 地址写入 mediaUrl。"""
         return bool(value and re.match(r"^https?://", value, re.I))
 
     @staticmethod
@@ -246,7 +246,7 @@ class GoogleTransparencyWorker(BaseWorker):
                     result["copyText"] = parsed["copyText"]
 
                 videos = content_frame.locator("video")
-                sources = content_frame.locator("video source, source")
+                sources = content_frame.locator("video media, media")
                 images = content_frame.locator("img")
                 video_url = None
                 if await videos.count():

@@ -25,8 +25,8 @@ class JavaCallbackClient:
         """优先使用任务指定地址，否则按运行 ID 拼接默认回调地址。"""
         if callback_url:
             return callback_url
-        if self.settings.java_callback_base_url and payload.runId is not None:
-            return f"{self.settings.java_callback_base_url.rstrip('/')}/{payload.runId}/callback"
+        if self.settings.java_callback_base_url and payload.runID is not None:
+            return f"{self.settings.java_callback_base_url.rstrip('/')}/{payload.runID}/callback"
         return None
 
     async def send(self, payload: CallbackPayload, callback_url: str | None) -> None:

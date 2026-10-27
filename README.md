@@ -4,7 +4,7 @@
 
 ## 当前能力
 
-- FastAPI 内部任务 API：提交任务后立即返回 `jobId`。
+- FastAPI 内部任务 API：提交任务后立即返回 `jobID`。
 - Worker 注册和路由：`mock`、`meta_library`、`google_transparency`。
 - 异步执行、任务状态查询、失败回调和运行结果回调。
 - Meta Ads Library 公开网页抓取和 Google Ads Transparency 网页搜索抓取。
@@ -31,8 +31,8 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8091
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8091/jobs -Method Post -ContentType 'application/json' -Body (@{
   worker = 'mock'
-  runId = 10001
-  payload = @{ items = @(@{ externalAdId = 'demo-1'; copyText = 'demo' }) }
+  runID = 10001
+  payload = @{ items = @(@{ externalAdID = 'demo-1'; copyText = 'demo' }) }
 } | ConvertTo-Json -Depth 8)
 ```
 
