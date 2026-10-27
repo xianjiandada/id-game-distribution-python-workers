@@ -141,9 +141,9 @@ python scripts/live_smoke_test.py --max-results 3 --proxy-profile google_hk
 Python 环境：独立的 Python 3.12 虚拟环境（不选宝塔 pyenv 3.7）
 启动方式：命令行启动
 启动用户：www
-项目路径：/opt/id-game-distribution-python-workers/current
+项目路径：/data/opt/game/server/id-game-distribution-python-workers
 启动命令：python -m app --env-file .env.production（python 推荐替换为所选环境的实际解释器绝对路径）
-安装依赖包：/opt/id-game-distribution-python-workers/current/requirements.txt
+安装依赖包：/data/opt/game/server/id-game-distribution-python-workers/requirements.txt
 环境变量：无（入口加载指定的 .env.production）
 项目初始化命令：留空
 ```
