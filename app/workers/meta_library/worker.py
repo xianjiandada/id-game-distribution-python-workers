@@ -23,7 +23,9 @@ class MetaLibraryWorker(BaseWorker):
                 # Meta 可能返回 403，但仍然把公开结果渲染在页面中，不能只看 HTTP 状态。
                 response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 await page.wait_for_timeout(int(payload.get("waitMs", 5000)))
-                items = await self._parse_cards(page, int(payload.get("maxResults", 20)), payload)
+                max_results = MetaLibraryWorker._parse_max_results(payload.get("maxResults"))
+                await MetaLibraryWorker._load_more_cards(page, max_results, int(payload.get("waitMs", 5000)))
+                items = await self._parse_cards(page, max_results, payload)
                 if items:
                     return WorkerResult(fetchedCount=len(items), newCount=len(items), items=items)
 
@@ -63,7 +65,7 @@ class MetaLibraryWorker(BaseWorker):
         return "https://www.facebook.com/ads/library/?" + urlencode(params)
 
     @staticmethod
-    async def _parse_cards(page, max_results: int, payload: dict) -> list[dict]:
+    async def _parse_cards(page, max_results: int | None, payload: dict) -> list[dict]:
         """读取语义文本和链接，避免依赖 Meta 会变化的随机 CSS class。"""
         cards = page.get_by_text("Library ID:", exact=False)
         items: list[dict] = []
@@ -118,6 +120,38 @@ class MetaLibraryWorker(BaseWorker):
                     "sourceUrl": page.url,
                 }
             )
-            if len(items) >= max_results:
+            if max_results is not None and len(items) >= max_results:
                 break
         return items
+
+    @staticmethod
+    def _parse_max_results(value: object) -> int | None:
+        """解析拉取条数；缺省、空值和 0 表示不限制。"""
+        if value is None or str(value).strip() == "":
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @staticmethod
+    async def _load_more_cards(page, max_results: int | None, wait_ms: int) -> None:
+        """滚动 Meta 结果页加载更多卡片，直到达到上限或页面不再增长。"""
+        stable_rounds = 0
+        # 有上限时给每条结果最多约 20 倍的页面加载机会；无上限时继续到页面稳定。
+        max_rounds = min(max_results * 20 if max_results else 100, 100)
+        cards = page.get_by_text("Library ID:", exact=False)
+        for _ in range(max_rounds):
+            count_before = await cards.count()
+            if max_results is not None and count_before >= max_results:
+                return
+            await page.mouse.wheel(0, 1600)
+            await page.wait_for_timeout(min(max(wait_ms // 4, 300), 1500))
+            count_after = await cards.count()
+            if count_after <= count_before:
+                stable_rounds += 1
+            else:
+                stable_rounds = 0
+            if stable_rounds >= 3:
+                return

@@ -79,7 +79,7 @@ async def _main(
                 "activeStatus": "active",
                 "adType": "all",
                 "mediaType": "all",
-                "maxResults": max_results,
+                "maxResults": None if max_results == 0 else max_results,
                 "waitMs": wait_ms,
             },
             {"keyword": meta_keyword, "country": "ALL"},
@@ -90,7 +90,7 @@ async def _main(
             {
                 "advertiserName": google_advertiser,
                 "region": google_region,
-                "maxResults": max_results,
+                "maxResults": None if max_results == 0 else max_results,
                 "suggestionWaitMs": wait_ms,
                 "resultWaitMs": wait_ms,
             },
@@ -137,8 +137,8 @@ def main() -> int:
         parser.error("--google-advertiser 不能为空")
     if len(args.google_region.strip()) != 2 or not args.google_region.strip().isalpha():
         parser.error("--google-region 必须是两位地区代码，例如 SG 或 HK")
-    if args.max_results < 1 or args.max_results > 20:
-        parser.error("--max-results 必须在 1 到 20 之间")
+    if args.max_results < 0 or args.max_results > 1000:
+        parser.error("--max-results 必须在 0 到 1000 之间，0 表示不限制")
     if args.wait_ms < 0 or args.wait_ms > 60000:
         parser.error("--wait-ms 必须在 0 到 60000 之间")
     return asyncio.run(

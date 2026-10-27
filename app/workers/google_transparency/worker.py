@@ -73,7 +73,9 @@ class GoogleTransparencyWorker(BaseWorker):
                         errorCode="GOOGLE_NO_CREATIVES",
                         errorMessage=f"广告主已找到，但没有加载素材: {keyword}",
                     )
-                items = await self._parse_creatives(page, min(int(payload.get("maxResults", 20)), await creatives.count()), region)
+                max_results = GoogleTransparencyWorker._parse_max_results(payload.get("maxResults"))
+                await GoogleTransparencyWorker._load_more_creatives(page, max_results, int(payload.get("resultWaitMs", 6000)))
+                items = await self._parse_creatives(page, max_results, region)
                 return WorkerResult(fetchedCount=len(items), newCount=len(items), items=items)
             except Exception as exc:  # noqa: BLE001 - 网页变化要回调明确错误
                 return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_BROWSER_EXCEPTION", errorMessage=str(exc)[:500])
@@ -81,7 +83,7 @@ class GoogleTransparencyWorker(BaseWorker):
                 await browser.close()
 
     @staticmethod
-    async def _parse_creatives(page, max_results: int, region: str) -> list[dict]:
+    async def _parse_creatives(page, max_results: int | None, region: str) -> list[dict]:
         """从素材卡片的无障碍标签、预览脚本和嵌套广告 iframe 提取素材。"""
         advertiser = ""
         current_name = page.locator(".advertiser-name.current-scope")
@@ -97,7 +99,7 @@ class GoogleTransparencyWorker(BaseWorker):
         creative_count = await creatives.count()
         link_count = await creative_links.count()
         # 前几条视频经常只有预览脚本没有可下载地址，向后多扫描一些卡片，避免结果页全部没有素材。
-        scan_limit = min(creative_count, max(max_results * 20, max_results))
+        scan_limit = creative_count if max_results is None else min(creative_count, max(max_results * 20, max_results))
         for index in range(scan_limit):
             card = creatives.nth(index)
             label = await card.get_attribute("aria-label") or ""
@@ -153,11 +155,40 @@ class GoogleTransparencyWorker(BaseWorker):
             if media_url:
                 media_items.append(item)
             # 已经凑够带可访问媒体地址的结果后停止继续扫描，避免无意义地打开全部预览 iframe。
-            if len(media_items) >= max_results:
+            if max_results is not None and len(result) >= max_results:
                 break
-        if media_items:
-            return media_items[:max_results]
-        return result[:max_results]
+        return result if max_results is None else result[:max_results]
+
+    @staticmethod
+    def _parse_max_results(value: object) -> int | None:
+        """解析拉取条数；缺省、空值和 0 表示不限制。"""
+        if value is None or str(value).strip() == "":
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @staticmethod
+    async def _load_more_creatives(page, max_results: int | None, wait_ms: int) -> None:
+        """滚动 Google 广告主页面加载更多素材，直到达到上限或页面不再增长。"""
+        stable_rounds = 0
+        max_rounds = min(max_results * 20 if max_results else 100, 100)
+        creatives = page.locator("creative")
+        for _ in range(max_rounds):
+            count_before = await creatives.count()
+            if max_results is not None and count_before >= max_results:
+                return
+            await page.mouse.wheel(0, 1600)
+            await page.wait_for_timeout(min(max(wait_ms // 4, 300), 1500))
+            count_after = await creatives.count()
+            if count_after <= count_before:
+                stable_rounds += 1
+            else:
+                stable_rounds = 0
+            if stable_rounds >= 3:
+                return
 
     @staticmethod
     def _is_http_url(value: str | None) -> bool:

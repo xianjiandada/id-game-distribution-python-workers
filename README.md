@@ -24,6 +24,8 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8091
 
 任务完成后，Python 会把运行审计和素材结果写入 `data/worker.db`；Java Manager 回调成功后再写入 Java 主库的 `creative_run` 和 `creative_item`。
 
+任务参数中的 `payload.maxResults` 用于控制每个搜索词的拉取数量：传入 `1000` 表示最多拉取 1000 条，传入 `0`、空值或不传表示不限制。不限数量时 Worker 会滚动公开结果页，直到页面不再加载新素材；平台未公开或需要验证的结果仍会返回人工处理状态。
+
 提交一个 Mock 任务：
 
 ```powershell
@@ -46,6 +48,12 @@ python scripts/live_smoke_test.py
 
 ```powershell
 python scripts/live_smoke_test.py --meta-keyword "手机壳" --google-advertiser "Supercell Oy" --google-region HK --max-results 2
+```
+
+测试不限数量的公开结果：
+
+```powershell
+python scripts/live_smoke_test.py --max-results 0
 ```
 
 Meta 默认使用 `country=ALL`，Google 默认使用 `region=SG`。需要代理时，先配置逻辑 Profile，再传入 Profile 名称：
