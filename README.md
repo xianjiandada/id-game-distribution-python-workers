@@ -122,16 +122,16 @@ python scripts/live_smoke_test.py --max-results 3 --proxy-profile google_hk
 
 ## 线上运行（Ubuntu + 宝塔）
 
-**不需要编译打包，直接上传源码即可；压缩成 ZIP 上传解压也可以。** 必需文件是 `app/`、`requirements.txt` 和 `.env.production.example`。不要上传本地 `.venv`、`.idea`、实际 `.env*` 配置、缓存或 `data/`；服务器单独安装依赖和 Chromium。
+**不需要编译打包，直接上传源码即可；压缩成 ZIP 上传解压也可以。** 必需文件是 `app/`、`requirements.txt` 和项目根目录的 `.env.production`。当前仓库提供的 `.env.production` 不含真实密码或代理凭据，可以随代码上传；不要上传本地 `.venv`、`.idea`、缓存或 `data/`。服务器仍需单独安装依赖和 Chromium。
 
-首次发布，在服务器将 [.env.production.example](.env.production.example) 复制为 `.env.production`，核对回调地址和共享目录后使用生产命令；后续发布保留服务器上的实际配置。本地启动仍读取 `.env`：
+首次发布，直接上传项目根目录的 `.env.production`，核对回调地址和共享目录后使用生产命令；后续发布更新代码时一并上传该文件即可。若在其中填写真实密码或代理凭据，应改为服务器单独管理并从 Git 提交中移除。本地启动仍读取 `.env`：
 
 ```text
 本地：python -m app
 生产：python -m app --env-file .env.production
 ```
 
-指定生产文件不存在时会报错，不会回退使用 `.env`；系统 / 面板环境变量优先于文件。实际 `.env.production` 已加入 Git 忽略规则。
+指定生产文件不存在时会报错，不会回退使用 `.env`；系统 / 面板环境变量优先于文件。
 
 已有按宝塔截图编写的[部署上线说明](docs/部署上线.md)。在**网站 → Python 项目 → 添加项目**中选择“命令行启动”，由该面板管理启停、重启和日志，使用一个进程。
 
