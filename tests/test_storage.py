@@ -26,14 +26,19 @@ def test_job_store_persists_job_and_deduplicates_items(tmp_path):
     )
     store.save_submitted(job)
     store.save_finished(job)
+    # 模拟四小时后的第二次任务：相同媒体和素材 ID 仍更新同一行。
+    job.jobID = "job-2"
+    job.runID = 124
+    store.save_submitted(job)
     job.items[0]["copyText"] = "B"
     store.save_finished(job)
     import sqlite3
     with sqlite3.connect(tmp_path / "worker.db") as connection:
-        assert connection.execute("select count(*) from worker_job").fetchone()[0] == 1
+        assert connection.execute("select count(*) from worker_job").fetchone()[0] == 2
+        assert connection.execute("select count(*) from worker_item").fetchone()[0] == 1
         row = connection.execute("select itemJson from worker_item").fetchone()[0]
         assert json.loads(row)["copyText"] == "B"
-        # 每次任务对素材的观察都保留一条历史，后续可按日期比较。
-        assert connection.execute("select count(*) from worker_item_observation").fetchone()[0] == 1
+        # 新库不再建逐次观察表，避免按任务复制整份素材。
+        assert connection.execute("select count(*) from sqlite_master where name = 'worker_item_observation'").fetchone()[0] == 0
         job_row = connection.execute("select queryID, appID, productName, keyword from worker_job").fetchone()
         assert tuple(job_row) == ("20001", "1001", "示例产品", "螺丝")

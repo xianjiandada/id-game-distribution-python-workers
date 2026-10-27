@@ -89,29 +89,6 @@ class JobStore:
                     PRIMARY KEY (media, externalAdID),
                     FOREIGN KEY (jobID) REFERENCES worker_job(jobID)
                 );
-                -- worker_item_observation 保存每次运行看到素材的历史，支持按天判断新增和更新。
-                CREATE TABLE IF NOT EXISTS worker_item_observation (
-                    -- 观察记录自增主键。
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    -- 本次 Python 任务 ID。
-                    jobID TEXT NOT NULL,
-                    -- 平台来源。
-                    media TEXT NOT NULL,
-                    -- 平台侧素材 ID。
-                    externalAdID TEXT NOT NULL,
-                    -- 产品 appID。
-                    appID TEXT,
-                    -- 查询配置 ID。
-                    queryID TEXT,
-                    -- 本次采集日期（UTC）。
-                    collectionDate TEXT NOT NULL,
-                    -- 本次观察时间。
-                    observedAt TEXT NOT NULL,
-                    -- 本次素材快照 JSON。
-                    itemJson TEXT NOT NULL,
-                    FOREIGN KEY (jobID) REFERENCES worker_job(jobID),
-                    UNIQUE (jobID, media, externalAdID)
-                );
                 """
             )
     def save_submitted(self, job: JobView) -> None:
@@ -178,23 +155,6 @@ class JobStore:
                         str(item.get("appID") or job.appID) if (item.get("appID") or job.appID) is not None else None,
                         str(item.get("queryID") or job.queryID) if (item.get("queryID") or job.queryID) is not None else None,
                         item.get("keyword") or job.keyword,
-                        json.dumps(item, ensure_ascii=False),
-                    ),
-                )
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO worker_item_observation
-                    (jobID, media, externalAdID, appID, queryID, collectionDate, observedAt, itemJson)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        job.jobID,
-                        media,
-                        str(external_id),
-                        str(item.get("appID") or job.appID) if (item.get("appID") or job.appID) is not None else None,
-                        str(item.get("queryID") or job.queryID) if (item.get("queryID") or job.queryID) is not None else None,
-                        (job.finishedAt or job.acceptedAt).date().isoformat(),
-                        (job.finishedAt or job.acceptedAt).isoformat(),
                         json.dumps(item, ensure_ascii=False),
                     ),
                 )
