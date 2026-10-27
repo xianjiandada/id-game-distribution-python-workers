@@ -14,7 +14,7 @@ def test_explicit_config_does_not_merge_local_env(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text(
         "PORT=10001\nJAVA_CALLBACK_BASE_URL=http://local.invalid\n", encoding="utf-8"
     )
-    production = tmp_path / ".env.production"
+    production = tmp_path / "production.env"
     production.write_text("APP_ENV=production\nHOST=127.0.0.1\nPORT=13371\n", encoding="utf-8")
     captured = {}
 
@@ -33,7 +33,7 @@ def test_explicit_config_does_not_merge_local_env(tmp_path, monkeypatch):
 
 def test_process_environment_overrides_selected_file(tmp_path, monkeypatch):
     monkeypatch.setenv("PORT", "13372")
-    production = tmp_path / ".env.production"
+    production = tmp_path / "production.env"
     production.write_text("PORT=13371\n", encoding="utf-8")
     ports = []
     monkeypatch.setattr("app.__main__.uvicorn.run", lambda app, **kwargs: ports.append(kwargs["port"]))

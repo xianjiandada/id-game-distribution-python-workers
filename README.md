@@ -122,13 +122,13 @@ python scripts/live_smoke_test.py --max-results 3 --proxy-profile google_hk
 
 ## 线上运行（Ubuntu + 宝塔）
 
-**不需要编译打包，直接上传源码即可；压缩成 ZIP 上传解压也可以。** 必需文件是 `app/`、`requirements.txt` 和项目根目录的 `.env.production`。当前仓库提供的 `.env.production` 不含真实密码或代理凭据，可以随代码上传；不要上传本地 `.venv`、`.idea`、缓存或 `data/`。服务器仍需单独安装依赖和 Chromium。
+**不需要编译打包，直接上传源码即可；压缩成 ZIP 上传解压也可以。** 必需文件是 `app/`、`requirements.txt` 和项目根目录的 `production.env`。当前仓库提供的 `production.env` 不含真实密码或代理凭据，可以随代码上传；不要上传本地 `.venv`、`.idea`、缓存或 `data/`。服务器仍需单独安装依赖和 Chromium。
 
-首次发布，直接上传项目根目录的 `.env.production`，核对回调地址和共享目录后使用生产命令；后续发布更新代码时一并上传该文件即可。若在其中填写真实密码或代理凭据，应改为服务器单独管理并从 Git 提交中移除。本地启动仍读取 `.env`：
+首次发布，直接上传项目根目录的 `production.env`，核对回调地址和共享目录后使用生产命令；后续发布更新代码时一并上传该文件即可。若在其中填写真实密码或代理凭据，应改为服务器单独管理并从 Git 提交中移除。本地启动仍读取 `.env`：
 
 ```text
 本地：python -m app
-生产：python -m app --env-file .env.production
+生产：python -m app --env-file production.env
 ```
 
 指定生产文件不存在时会报错，不会回退使用 `.env`；系统 / 面板环境变量优先于文件。
@@ -142,13 +142,13 @@ Python 环境：独立的 Python 3.14.4 环境（不选宝塔 pyenv 3.7；异常
 启动方式：命令行启动
 启动用户：www
 项目路径：/data/opt/game/server/id-game-distribution-python-workers
-启动命令：python -m app --env-file .env.production（python 推荐替换为所选环境的实际解释器绝对路径）
+启动命令：python -m app --env-file production.env（python 推荐替换为所选环境的实际解释器绝对路径）
 安装依赖包：/data/opt/game/server/id-game-distribution-python-workers/requirements.txt
-环境变量：无（入口加载指定的 .env.production）
+环境变量：无（入口加载指定的 production.env）
 项目初始化命令：留空
 ```
 
-按部署文档准备 `.env.production`、共享数据库路径并安装 Chromium，创建后核实项目实际解释器、启动命令及自启动 / 自动重启设置。检查 `/health`，再验证 Java 回调。线上不要加 `--reload` 或开启多进程，也不要同时用 Supervisor 管理同一个服务。
+按部署文档准备 `production.env`、共享数据库路径并安装 Chromium，创建后核实项目实际解释器、启动命令及自启动 / 自动重启设置。检查 `/health`，再验证 Java 回调。线上不要加 `--reload` 或开启多进程，也不要同时用 Supervisor 管理同一个服务。
 
 Chromium 使用项目解释器在宝塔**终端**中通过 Playwright 安装，**不用安装软件商店的 `chromium（Docker应用）`**。组件区别、安装命令和验证步骤见[部署文档第 5 节](docs/部署上线.md#5-在宝塔终端安装-chromium)。
 

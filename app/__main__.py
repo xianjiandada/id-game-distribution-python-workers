@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 def main(argv: list[str] | None = None) -> None:
     """加载选定配置后启动服务；系统环境变量优先于文件配置。"""
     parser = argparse.ArgumentParser(description="启动 Python Worker 服务")
-    parser.add_argument("--env-file", type=Path, help="指定配置文件，例如 .env.production；默认读取 .env")
+    parser.add_argument("--env-file", type=Path, help="指定配置文件，例如 production.env；默认读取 .env")
     args = parser.parse_args(argv)
     if args.env_file is not None:
         if not args.env_file.is_file():
