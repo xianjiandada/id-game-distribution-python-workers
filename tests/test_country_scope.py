@@ -24,3 +24,8 @@ def test_google_country_defaults_to_anywhere() -> None:
 def test_google_uses_first_selected_region() -> None:
     """Google 只接受一个地区时，使用输入列表的第一个代码。"""
     assert GoogleTransparencyWorker._resolve_region({"countryCodes": ["SG", "HK"]}) == "SG"
+
+
+def test_google_all_alias_maps_to_anywhere() -> None:
+    """前端的“全部地区”标记 ALL 应转换为 Google 的 ANYWHERE。"""
+    assert GoogleTransparencyWorker._resolve_region({"countryCodes": ["ALL"]}) == "ANYWHERE"

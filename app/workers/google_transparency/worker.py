@@ -184,7 +184,8 @@ class GoogleTransparencyWorker(BaseWorker):
         if region is None or str(region).strip() == "":
             country_codes = payload.get("countryCodes") or []
             region = country_codes[0] if country_codes else "ANYWHERE"
-        return str(region).strip().upper() or "ANYWHERE"
+        normalized = str(region).strip().upper()
+        return "ANYWHERE" if normalized in {"", "ALL", "ANYWHERE"} else normalized
 
     @staticmethod
     async def _load_more_creatives(page, max_results: int | None, wait_ms: int) -> None:
