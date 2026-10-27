@@ -130,6 +130,9 @@ class GoogleTransparencyWorker(BaseWorker):
                 "previewScriptUrl": src,
                 "previewText": preview["previewText"],
                 "previewImageUrl": preview_image_url,
+                # 预览文案中通常包含竞品产品名；包名只有页面明确返回时才填入，不能臆造。
+                "detectedProductName": preview["productName"],
+                "detectedPackageName": preview["packageName"],
             }
             item = {
                 "source": "GOOGLE_TRANSPARENCY_WEB",
@@ -140,6 +143,9 @@ class GoogleTransparencyWorker(BaseWorker):
                 "region": region,
                 "regions": [region],
                 "format": media_type or "UNKNOWN",
+                # 标准列用于 CMS 直接展示，完整预览文案仍保存在 platformData 中。
+                "title": preview["productName"],
+                "copyText": preview["copyText"],
                 "versionId": version_match.group(1) if version_match else None,
                 "cardLabel": label,
                 "creativeUrl": detail_url or (
@@ -203,6 +209,9 @@ class GoogleTransparencyWorker(BaseWorker):
             "previewImageUrl": None,
             "previewText": None,
             "mediaType": None,
+            "productName": None,
+            "packageName": None,
+            "copyText": None,
         }
         outer_iframes = card.locator("iframe")
         if not await outer_iframes.count():
@@ -220,6 +229,10 @@ class GoogleTransparencyWorker(BaseWorker):
                 body_text = (await body.inner_text()).strip()
                 if body_text and not result["previewText"]:
                     result["previewText"] = body_text[:2000]
+                    parsed = GoogleTransparencyWorker._parse_preview_text(result["previewText"])
+                    result["productName"] = parsed["productName"]
+                    result["packageName"] = parsed["packageName"]
+                    result["copyText"] = parsed["copyText"]
 
                 videos = content_frame.locator("video")
                 sources = content_frame.locator("video source, source")
@@ -248,3 +261,32 @@ class GoogleTransparencyWorker(BaseWorker):
             # 单个广告的预览 iframe 可能被浏览器阻断，不能因此丢弃整页其他素材。
             return result
         return result
+
+    @staticmethod
+    def _parse_preview_text(text: str | None) -> dict[str, str | None]:
+        """从 Google 广告预览可见文案提取产品名、包名和描述，无法确认时保留空值。"""
+        lines = [re.sub(r"\s+", " ", line).strip() for line in (text or "").splitlines()]
+        lines = [line for line in lines if line]
+        ignored = {
+            "install", "instalar", "安装", "learn more", "了解详情", "sponsored",
+            "visit advertiser", "skip", "×", "⋮", "downloads", "game_casual",
+        }
+        meaningful = [line for line in lines if line.lower() not in ignored and not re.fullmatch(r"[·.\s]+", line)]
+        if not meaningful:
+            return {"productName": None, "packageName": None, "copyText": None}
+        # 过滤 Google 展示控件、价格占位符和下载量占位符。
+        meaningful = [line for line in meaningful if not re.search(r"^(AdNaN|\[Number of downloads\])", line, re.I)]
+        product_name = meaningful[0] if meaningful else None
+        # 不能直接取第一行的 search 结果；产品标题通常不是包名，要继续查找后续文案。
+        package_match = next(
+            (match for line in meaningful
+             if (match := re.search(r"\b([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){1,})\b", line, re.I))),
+            None,
+        )
+        package_name = package_match.group(1) if package_match else None
+        copy_lines = [line for line in meaningful[1:] if line != product_name and line != package_name]
+        return {
+            "productName": product_name[:500] if product_name else None,
+            "packageName": package_name[:255] if package_name else None,
+            "copyText": "\n".join(copy_lines)[:4000] if copy_lines else None,
+        }

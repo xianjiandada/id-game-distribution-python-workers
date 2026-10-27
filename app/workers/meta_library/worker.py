@@ -104,6 +104,8 @@ class MetaLibraryWorker(BaseWorker):
                     "identityConfidence": "STABLE",
                     "advertiserName": advertiser,
                     "copyText": copy_text,
+                    # Ads Library 当前公开卡片主要返回图片缩略图；明确写入类型，避免 Java/CMS 把图片误判为未知。
+                    "mediaType": "IMAGE" if media_urls else "UNKNOWN",
                     "startedText": started,
                     "regions": payload.get("countryCodes") or [payload.get("country", "HK")],
                     # Meta 页面字段可能随版本变化，保留有用的原始筛选和投放信息。
