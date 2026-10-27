@@ -22,7 +22,8 @@ class GoogleTransparencyWorker(BaseWorker):
                 errorMessage="必须提供 advertiserName 或 keyword",
             )
 
-        region = str(payload.get("region") or "HK").upper()
+        # Google 未填写国家/地区时使用 ANYWHERE；填写多个代码时取第一个作为 Google 查询地区。
+        region = GoogleTransparencyWorker._resolve_region(payload)
         proxy = {"server": proxy_url} if proxy_url else None
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=True, proxy=proxy)
@@ -175,6 +176,15 @@ class GoogleTransparencyWorker(BaseWorker):
         except (TypeError, ValueError):
             return None
         return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _resolve_region(payload: dict) -> str:
+        """把可选国家/地区输入转换为 Google Transparency 的地区参数。"""
+        region = payload.get("region")
+        if region is None or str(region).strip() == "":
+            country_codes = payload.get("countryCodes") or []
+            region = country_codes[0] if country_codes else "ANYWHERE"
+        return str(region).strip().upper() or "ANYWHERE"
 
     @staticmethod
     async def _load_more_creatives(page, max_results: int | None, wait_ms: int) -> None:

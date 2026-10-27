@@ -48,7 +48,8 @@ class MetaLibraryWorker(BaseWorker):
     @staticmethod
     def _build_url(payload: dict) -> str:
         """把后台查询条件转换为 Ads Library 网页查询参数。"""
-        country_codes = payload.get("countryCodes") or [payload.get("country", "HK")]
+        # 未传国家或地区时按全部地区查询，避免误回退到某个默认国家。
+        country_codes = payload.get("countryCodes") or [payload.get("country") or "ALL"]
         params = {
             "active_status": payload.get("activeStatus", "active"),
             "ad_type": payload.get("adType", "all"),
@@ -107,7 +108,7 @@ class MetaLibraryWorker(BaseWorker):
                     # Ads Library 当前公开卡片主要返回图片缩略图；明确写入类型，避免 Java/CMS 把图片误判为未知。
                     "mediaType": "IMAGE" if media_urls else "UNKNOWN",
                     "startedText": started,
-                    "regions": payload.get("countryCodes") or [payload.get("country", "HK")],
+                    "regions": payload.get("countryCodes") or [payload.get("country") or "ALL"],
                     # Meta 页面字段可能随版本变化，保留有用的原始筛选和投放信息。
                     "platformData": {
                         "startedText": started,
