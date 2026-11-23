@@ -11,6 +11,7 @@ from .models import CallbackPayload, JobStatus, JobSubmitRequest, JobView, Worke
 from .proxy import ProxyLease, ProxyResolver
 from .storage import JobStore
 from .registry import WorkerRegistry
+from .workers.countries import collect_countries
 
 
 class JobService:
@@ -41,13 +42,12 @@ class JobService:
             status=JobStatus.DISPATCHED,
             payload=request.payload,
             queryID=request.payload.get("queryID"),
-            appID=request.payload.get("appID"),
-            productName=request.payload.get("productName"),
             keyword=request.payload.get("keyword") or request.payload.get("advertiserName"),
-            media=("GOOGLE_TRANSPARENCY_WEB" if request.worker.startswith("google") else "META_LIBRARY_WEB"),
+            media=_media_for_worker(request.worker),
             windowStart=request.payload.get("windowStart"),
             windowEnd=request.payload.get("windowEnd"),
             proxyProfile=request.proxyProfile,
+            proxyRequired=request.proxyRequired,
             acceptedAt=utc_now(),
         )
         self.jobs[job_id] = job
@@ -71,7 +71,10 @@ class JobService:
                 worker = self.registry.get(job.worker)
                 proxy = self.proxies.get(job_id)
                 proxy_url = proxy.server if proxy else None
-                result = await asyncio.wait_for(worker.run(job.payload, proxy_url), timeout=self.settings.job_timeout_seconds)
+                if job.worker in {"google_transparency", "meta_library", "tiktok_ads_library"}:
+                    result = await collect_countries(worker, job.payload, proxy_url, self.settings.job_timeout_seconds)
+                else:
+                    result = await asyncio.wait_for(worker.run(job.payload, proxy_url), self.settings.job_timeout_seconds)
             self._apply_result(job, result)
         except asyncio.TimeoutError:
             self._apply_result(job, WorkerResult(status=JobStatus.TIMEOUT, errorCode="JOB_TIMEOUT", errorMessage="worker exceeded timeout"))
@@ -79,8 +82,10 @@ class JobService:
             self._apply_result(job, WorkerResult(status=JobStatus.FAILED, errorCode="WORKER_EXCEPTION", errorMessage=str(exc)[:500]))
         finally:
             job.finishedAt = utc_now()
-            self.store.save_finished(job)
-            await self._callback(job)
+            try:
+                await self._callback(job)
+            finally:
+                self.store.save_finished(job)
 
     @staticmethod
     def _apply_result(job: JobView, result: WorkerResult) -> None:
@@ -94,15 +99,17 @@ class JobService:
         for item in result.items:
             normalized = dict(item)
             normalized.setdefault("queryID", job.queryID)
-            normalized.setdefault("appID", job.appID)
-            normalized.setdefault("productName", job.productName)
             normalized.setdefault("keyword", job.keyword)
             normalized.setdefault("media", job.media)
-            # 内容指纹忽略产品和查询上下文，避免同一素材被不同搜索词发现时误判为内容更新。
+            # 内容指纹忽略查询上下文，避免同一素材被不同搜索词发现时误判为内容更新。
             normalized.setdefault("contentHash", _content_hash(normalized))
             job.items.append(normalized)
         job.errorCode = result.errorCode
         job.errorMessage = result.errorMessage
+        job.restrictionType = result.restrictionType or _restriction_type(result.errorCode, result.errorMessage)
+        job.restrictionEvidence = result.restrictionEvidence or (
+            result.errorMessage[:1000] if job.restrictionType and result.errorMessage else None
+        )
 
     async def _callback(self, job: JobView) -> None:
         """组装回调契约并发送给 Java；回调失败不覆盖原始抓取状态。"""
@@ -112,20 +119,22 @@ class JobService:
             worker=job.worker,
             status=job.status,
             queryID=job.queryID,
-            appID=job.appID,
-            productName=job.productName,
             keyword=job.keyword,
             media=job.media,
             collectionDate=(job.finishedAt or utc_now()).date().isoformat(),
             collectedAt=job.finishedAt or utc_now(),
             windowStart=job.windowStart,
             windowEnd=job.windowEnd,
+            proxyProfile=job.proxyProfile,
+            proxyRequired=job.proxyRequired,
             fetchedCount=job.fetchedCount,
             newCount=job.newCount,
             updatedCount=job.updatedCount,
             items=job.items,
             errorCode=job.errorCode,
             errorMessage=job.errorMessage,
+            restrictionType=job.restrictionType,
+            restrictionEvidence=job.restrictionEvidence,
         )
         try:
             await self.callback.send(payload, self.callback_urls.get(job.jobID))
@@ -135,8 +144,29 @@ class JobService:
 
 
 def _content_hash(item: dict) -> str:
-    """根据平台素材字段生成稳定指纹，排除产品、查询和抓取时间等上下文。"""
-    ignored = {"queryID", "appID", "productName", "keyword", "media", "collectionDate", "collectedAt"}
+    """根据平台素材字段生成稳定指纹，排除查询和抓取时间等上下文。"""
+    ignored = {"queryID", "keyword", "media", "collectionDate", "collectedAt"}
     content = {key: value for key, value in item.items() if key not in ignored}
     encoded = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _media_for_worker(worker: str) -> str:
+    """把 Worker 名称映射为稳定的平台来源值。"""
+    if worker.startswith("google"):
+        return "GOOGLE_TRANSPARENCY_WEB"
+    if worker.startswith("tiktok"):
+        return "TIKTOK_AD_LIBRARY_WEB"
+    return "META_LIBRARY_WEB"
+
+
+def _restriction_type(error_code: str | None, error_message: str | None) -> str | None:
+    """把平台挑战和限流错误归一化，供 Java 运行记录保存。"""
+    text = f"{error_code or ''} {error_message or ''}".lower()
+    if any(token in text for token in ("captcha", "verify you are human", "访问验证", "验证码")):
+        return "CAPTCHA_REQUIRED"
+    if any(token in text for token in ("429", "rate limit", "too many requests", "暂时不可用", "api_busy")):
+        return "RATE_LIMITED"
+    if any(token in text for token in ("page_challenge", "access denied", "forbidden", "blocked", "ip")):
+        return "IP_RESTRICTED"
+    return None

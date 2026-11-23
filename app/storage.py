@@ -36,10 +36,6 @@ class JobStore:
                     runID TEXT,
                     -- Java 侧素材查询配置 ID。
                     queryID TEXT,
-                    -- 产品 appID，用于按产品区分素材。
-                    appID TEXT,
-                    -- 产品名称快照。
-                    productName TEXT,
                     -- 本次运行的搜索词或广告主名称。
                     keyword TEXT,
                     -- Worker 注册名称。
@@ -48,6 +44,10 @@ class JobStore:
                     status TEXT NOT NULL,
                     -- Worker 原始请求参数 JSON。
                     payloadJson TEXT NOT NULL,
+                    -- 逻辑代理 Profile，不保存代理地址和认证信息。
+                    proxyProfile TEXT,
+                    -- 是否强制使用代理。
+                    proxyRequired INTEGER NOT NULL DEFAULT 0,
                     -- 抓取素材总数。
                     fetchedCount INTEGER NOT NULL DEFAULT 0,
                     -- 新素材数量。
@@ -58,6 +58,9 @@ class JobStore:
                     errorCode TEXT,
                     -- 错误或人工介入说明。
                     errorMessage TEXT,
+                    -- 访问限制分类和证据摘要。
+                    restrictionType TEXT,
+                    restrictionEvidence TEXT,
                     -- 任务接收时间。
                     acceptedAt TEXT NOT NULL,
                     -- Worker 开始执行时间。
@@ -73,8 +76,6 @@ class JobStore:
                     externalAdID TEXT NOT NULL,
                     -- 最近一次保存该素材的 Python 任务 ID。
                     jobID TEXT NOT NULL,
-                    -- 产品 appID 快照。
-                    appID TEXT,
                     -- 查询配置 ID 快照。
                     queryID TEXT,
                     -- 搜索词快照。
@@ -91,25 +92,35 @@ class JobStore:
                 );
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(worker_job)")}
+            for name, definition in (
+                ("proxyProfile", "TEXT"),
+                ("proxyRequired", "INTEGER NOT NULL DEFAULT 0"),
+                ("restrictionType", "TEXT"),
+                ("restrictionEvidence", "TEXT"),
+            ):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE worker_job ADD COLUMN {name} {definition}")
     def save_submitted(self, job: JobView) -> None:
         """保存刚接收的任务，支持同一 jobID 重试覆盖。"""
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO worker_job
-                (jobID, runID, queryID, appID, productName, keyword, worker, status, payloadJson, acceptedAt)
+                (jobID, runID, queryID, keyword, worker, status, payloadJson,
+                 proxyProfile, proxyRequired, acceptedAt)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.jobID,
                     str(job.runID) if job.runID is not None else None,
                     str(job.queryID) if job.queryID is not None else None,
-                    str(job.appID) if job.appID is not None else None,
-                    job.productName,
                     job.keyword,
                     job.worker,
                     job.status.value,
                     json.dumps(job.payload, ensure_ascii=False),
+                    job.proxyProfile,
+                    int(job.proxyRequired),
                     job.acceptedAt.isoformat(),
                 ),
             )
@@ -120,7 +131,8 @@ class JobStore:
             connection.execute(
                 """
                 UPDATE worker_job SET status=?, fetchedCount=?, newCount=?, updatedCount=?,
-                    errorCode=?, errorMessage=?, startedAt=?, finishedAt=? WHERE jobID=?
+                    errorCode=?, errorMessage=?, restrictionType=?, restrictionEvidence=?,
+                    startedAt=?, finishedAt=? WHERE jobID=?
                 """,
                 (
                     job.status.value,
@@ -129,6 +141,8 @@ class JobStore:
                     job.updatedCount,
                     job.errorCode,
                     job.errorMessage,
+                    job.restrictionType,
+                    job.restrictionEvidence,
                     job.startedAt.isoformat() if job.startedAt else None,
                     job.finishedAt.isoformat() if job.finishedAt else None,
                     job.jobID,
@@ -141,10 +155,10 @@ class JobStore:
                     continue
                 connection.execute(
                     """
-                    INSERT INTO worker_item (media, externalAdID, jobID, appID, queryID, keyword, itemJson)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO worker_item (media, externalAdID, jobID, queryID, keyword, itemJson)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(media, externalAdID) DO UPDATE SET
-                        jobID=excluded.jobID, appID=excluded.appID, queryID=excluded.queryID,
+                        jobID=excluded.jobID, queryID=excluded.queryID,
                         keyword=excluded.keyword, itemJson=excluded.itemJson,
                         lastSeenAt=CURRENT_TIMESTAMP
                     """,
@@ -152,7 +166,6 @@ class JobStore:
                         media,
                         str(external_id),
                         job.jobID,
-                        str(item.get("appID") or job.appID) if (item.get("appID") or job.appID) is not None else None,
                         str(item.get("queryID") or job.queryID) if (item.get("queryID") or job.queryID) is not None else None,
                         item.get("keyword") or job.keyword,
                         json.dumps(item, ensure_ascii=False),

@@ -13,6 +13,25 @@ from app.models import JobStatus, WorkerResult
 from app.workers.base import BaseWorker
 
 
+class MockWorker(BaseWorker):
+    """用于本地验证异步调度、失败回调和持久化的模拟 Worker。"""
+
+    name = "mock"
+
+    async def run(self, payload: dict, proxy_url: str | None = None) -> WorkerResult:
+        """按请求参数模拟耗时、失败或返回素材列表。"""
+        # Mock Worker 用于本地验证异步执行和回调链路。
+        await asyncio.sleep(float(payload.get("sleepSeconds", 0)))
+        if payload.get("fail"):
+            return WorkerResult(status=JobStatus.FAILED, errorCode="MOCK_FAILURE", errorMessage="mock failure")
+        items = payload.get("items", [])
+        return WorkerResult(
+            fetchedCount=len(items),
+            newCount=len(items),
+            items=items,
+        )
+
+
 class RecordingCallback(CallbackSender):
     """记录回调内容，验证任务完成后确实触发 Java 回调替身。"""
 
@@ -39,6 +58,7 @@ class ImmediateManualWorker(BaseWorker):
 async def test_mock_job_calls_java_callback_and_is_queryable():
     """验证提交接口立即返回，并最终得到成功状态和素材数量。"""
     app = create_app()
+    app.state.registry.register(MockWorker())
     callback = RecordingCallback()
     app.state.jobs.callback = callback
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -56,9 +76,10 @@ async def test_mock_job_calls_java_callback_and_is_queryable():
 
 
 @pytest.mark.asyncio
-async def test_product_query_context_is_kept_in_callback_and_items():
-    """验证 appID、查询配置和搜索词会随素材回调保留，便于 Java 按产品和日期入库。"""
+async def test_query_context_is_kept_in_callback_and_items():
+    """验证查询配置和搜索词会随素材回调保留，便于 Java 入库。"""
     app = create_app()
+    app.state.registry.register(MockWorker())
     callback = RecordingCallback()
     app.state.jobs.callback = callback
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -69,8 +90,6 @@ async def test_product_query_context_is_kept_in_callback_and_items():
                 "runID": 100,
                 "payload": {
                     "queryID": 20001,
-                    "appID": 1001,
-                    "productName": "示例产品",
                     "keyword": "竞品A",
                     "items": [{"externalAdID": "context-1"}],
                 },
@@ -82,8 +101,6 @@ async def test_product_query_context_is_kept_in_callback_and_items():
                 break
             await asyncio.sleep(0.01)
     assert callback.payloads[0].queryID == 20001
-    assert callback.payloads[0].appID == 1001
-    assert callback.payloads[0].productName == "示例产品"
     assert callback.payloads[0].items[0]["keyword"] == "竞品A"
 
 
@@ -92,6 +109,7 @@ async def test_failure_and_waiting_manual_are_explicit():
     """验证失败和人工介入状态不会被吞掉。"""
     app = create_app()
     app.state.registry._workers["google_transparency"] = ImmediateManualWorker()
+    app.state.registry.register(MockWorker())
     callback = RecordingCallback()
     app.state.jobs.callback = callback
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

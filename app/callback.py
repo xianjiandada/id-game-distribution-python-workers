@@ -37,6 +37,8 @@ class JavaCallbackClient:
         # Manager 回调接口通过 @NoNeedLogin 和 @NoNeedCheckHeader 放行，
         # 当前协议不附加额外认证请求头。
         headers = {"Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=self.settings.callback_timeout_seconds) as client:
+        # 建连失败快速返回；收到响应前 Manager 可能仍在逐条下载、上传和提交事务。
+        timeout = httpx.Timeout(self.settings.callback_timeout_seconds, connect=10, pool=10, write=60)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(url, json=payload.model_dump(mode="json"), headers=headers)
             response.raise_for_status()

@@ -1,7 +1,9 @@
+import asyncio
+import html
 import re
 from urllib.parse import urlencode, urljoin
 
-from playwright.async_api import async_playwright
+from playwright.async_api import Error as PlaywrightError, async_playwright
 
 from ...models import JobStatus, WorkerResult
 from ..base import BaseWorker
@@ -22,12 +24,13 @@ class GoogleTransparencyWorker(BaseWorker):
                 errorMessage="必须提供 advertiserName 或 keyword",
             )
 
-        # Google 未填写国家/地区时使用 ANYWHERE；填写多个代码时取第一个作为 Google 查询地区。
+        # Google 未填写国家/地区时使用 ANYWHERE；宿主按地区分别调用。
         region = GoogleTransparencyWorker._resolve_region(payload)
         proxy = {"server": proxy_url} if proxy_url else None
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=True, proxy=proxy)
-            page = await browser.new_page(locale="zh-CN")
+            context = await browser.new_context(locale="zh-CN")
+            page = await context.new_page()
             try:
                 await page.goto(
                     "https://adstransparency.google.com/?" + urlencode({"region": region}),
@@ -76,7 +79,22 @@ class GoogleTransparencyWorker(BaseWorker):
                     )
                 max_results = GoogleTransparencyWorker._parse_max_results(payload.get("maxResults"))
                 await GoogleTransparencyWorker._load_more_creatives(page, max_results, int(payload.get("resultWaitMs", 6000)))
-                items = await self._parse_creatives(page, max_results, region)
+                script_timeout_ms = GoogleTransparencyWorker._parse_positive_int(
+                    payload.get("scriptTimeoutMs"), 8000
+                )
+                items = await self._parse_creatives(page, max_results, region, script_timeout_ms)
+                if not items:
+                    return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_CREATIVES_UNREADABLE",
+                                        errorMessage="Google 素材卡片未返回可识别的平台素材 ID")
+                if region == "ANYWHERE":
+                    # 留出关闭浏览器、回传已采集素材的时间。
+                    remaining = payload.get("_countryDeadline", asyncio.get_running_loop().time() + 900)
+                    remaining -= asyncio.get_running_loop().time() + 5
+                    if remaining > 0:
+                        try:
+                            await asyncio.wait_for(self._load_delivery_regions(page.context, items), remaining)
+                        except (asyncio.TimeoutError, PlaywrightError):
+                            pass
                 return WorkerResult(fetchedCount=len(items), newCount=len(items), items=items)
             except Exception as exc:  # noqa: BLE001 - 网页变化要回调明确错误
                 return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_BROWSER_EXCEPTION", errorMessage=str(exc)[:500])
@@ -84,7 +102,50 @@ class GoogleTransparencyWorker(BaseWorker):
                 await browser.close()
 
     @staticmethod
-    async def _parse_creatives(page, max_results: int | None, region: str) -> list[dict]:
+    async def _load_delivery_regions(context, items):
+        """全球查询只读取单条广告详情中可见的展示地区菜单。"""
+        detail = await context.new_page()
+        try:
+            for item in items:
+                url = item.get("creativeUrl") or ""
+                if not re.match(r"^https://adstransparency\.google\.com/advertiser/AR[0-9]+/creative/CR[0-9]+", url):
+                    continue
+                try:
+                    response = await detail.goto(url, wait_until="domcontentloaded", timeout=12000)
+                    if response and response.status in (403, 429):
+                        break
+                    if not response or not response.ok:
+                        continue
+                    await detail.locator("creative-region-filter [role=button]:visible").first.click(timeout=5000)
+                    options = detail.locator("material-select-item[role=option]:visible")
+                    await options.first.wait_for(timeout=3000)
+                    codes = await options.evaluate_all("""options => {
+                        const names = new Map();
+                        for (const locale of ['en', 'zh-CN', 'zh-TW', 'zh-HK', document.documentElement.lang || 'en']) {
+                            const display = new Intl.DisplayNames(locale, {type:'region', fallback:'none'});
+                            for (let i=0; i<676; i++) {
+                                const code = String.fromCharCode(65 + Math.floor(i/26), 65 + i%26);
+                                const name = display.of(code);
+                                if (name && !['EU','UN','EZ','ZZ'].includes(code)) names.set(name, code);
+                            }
+                        }
+                        for (const [name, code] of Object.entries({
+                            '大韓民國':'KR', '香港':'HK', '澳门':'MO', '澳門':'MO', '台湾':'TW',
+                            '波斯尼亚 黑塞哥维那':'BA'
+                        })) names.set(name, code);
+                        return [...new Set(options.map(el => names.get(el.innerText.trim())).filter(Boolean))].sort();
+                    }""")
+                    if codes:
+                        item["regions"] = codes
+                except PlaywrightError:
+                    continue
+        finally:
+            await detail.close()
+
+    @staticmethod
+    async def _parse_creatives(
+        page, max_results: int | None, region: str, script_timeout_ms: int
+    ) -> list[dict]:
         """从素材卡片的无障碍标签、预览脚本和嵌套广告 iframe 提取素材。"""
         advertiser = ""
         current_name = page.locator(".advertiser-name.current-scope")
@@ -93,7 +154,6 @@ class GoogleTransparencyWorker(BaseWorker):
         advertiser_match = re.search(r"/advertiser/([^/?]+)", page.url)
         advertiser_id = advertiser_match.group(1) if advertiser_match else None
         result: list[dict] = []
-        media_items: list[dict] = []
         seen_external_ids: set[str] = set()
         creatives = page.locator("creative")
         creative_links = page.locator("a[href*='/creative/']")
@@ -101,6 +161,7 @@ class GoogleTransparencyWorker(BaseWorker):
         link_count = await creative_links.count()
         # 前几条视频经常只有预览脚本没有可下载地址，向后多扫描一些卡片，避免结果页全部没有素材。
         scan_limit = creative_count if max_results is None else min(creative_count, max(max_results * 20, max_results))
+        records: list[dict] = []
         for index in range(scan_limit):
             card = creatives.nth(index)
             label = await card.get_attribute("aria-label") or ""
@@ -110,60 +171,92 @@ class GoogleTransparencyWorker(BaseWorker):
             version_match = re.search(r"[?&]versionId=(\d+)", src or "")
             creative_id = creative_match.group(1) if creative_match else None
             if not creative_id:
-                # 预览脚本未加载时保留卡片序号，避免整批结果丢失。
-                creative_id = f"position-{index + 1}"
+                # 排序位置会变化，不能用作跨广告主共享的素材唯一键。
+                continue
             # Google 结果页使用虚拟列表时可能重复挂载同一张卡片，按平台素材 ID 去重。
             if creative_id in seen_external_ids:
                 continue
             seen_external_ids.add(creative_id)
             card_text = (await card.inner_text()).lower()
-            # Google 的实际图片/视频不在 creative 自身，而在跨域 SafeFrame 的下一层 iframe。
-            preview = await GoogleTransparencyWorker._extract_preview(card)
-            is_video = preview["mediaType"] == "VIDEO" or "videocam" in card_text or await card.locator("[icon='videocam']").count() > 0
-            media_type = "VIDEO" if is_video else preview["mediaType"]
             detail_href = await creative_links.nth(index).get_attribute("href") if index < link_count else None
             detail_url = urljoin(page.url, detail_href) if detail_href else None
-            media_url = preview["mediaUrl"] if GoogleTransparencyWorker._is_http_url(preview["mediaUrl"]) else None
-            preview_image_url = preview["previewImageUrl"] if GoogleTransparencyWorker._is_http_url(preview["previewImageUrl"]) else None
-            platform_data = {
-                "versionId": version_match.group(1) if version_match else None,
-                "cardLabel": label,
-                "previewScriptUrl": src,
-                "previewText": preview["previewText"],
-                "previewImageUrl": preview_image_url,
-                # 预览文案中通常包含竞品产品名；包名只有页面明确返回时才填入，不能臆造。
-                "detectedProductName": preview["productName"],
-                "detectedPackageName": preview["packageName"],
-            }
-            item = {
-                "media": "GOOGLE_TRANSPARENCY_WEB",
-                "externalAdID": creative_id,
-                "identityConfidence": "STABLE" if not creative_id.startswith("position-") else "DERIVED",
-                "advertiserID": advertiser_id,
-                "advertiserName": advertiser,
-                "region": region,
-                "regions": [region],
-                "format": media_type or "UNKNOWN",
-                # 标准列用于 CMS 直接展示，完整预览文案仍保存在 platformData 中。
-                "title": preview["productName"],
-                "copyText": preview["copyText"],
-                "versionId": version_match.group(1) if version_match else None,
-                "cardLabel": label,
-                "creativeUrl": detail_url or (
-                    f"https://adstransparency.google.com/advertiser/{advertiser_id}/creative/{creative_id}?region={region}"
-                    if advertiser_id and not creative_id.startswith("position-") else None
-                ),
-                "sourceUrl": page.url,
-                "previewScriptUrl": src,
-                "mediaUrl": media_url,
-                "platformData": platform_data,
-            }
-            result.append(item)
-            if media_url:
-                media_items.append(item)
-            # 已经凑够带可访问媒体地址的结果后停止继续扫描，避免无意义地打开全部预览 iframe。
-            if max_results is not None and len(result) >= max_results:
-                break
+            records.append({
+                "card": card,
+                "label": label,
+                "src": src,
+                "creative_id": creative_id,
+                "version_id": version_match.group(1) if version_match else None,
+                "card_text": card_text,
+                "detail_url": detail_url,
+                "has_video_icon": await card.locator("[icon='videocam']").count() > 0,
+            })
+
+        # 预览脚本请求彼此独立，限制并发后可以避免逐卡等待失效 URL。
+        semaphore = asyncio.Semaphore(8)
+
+        async def extract(record: dict) -> dict:
+            async with semaphore:
+                return await GoogleTransparencyWorker._extract_preview(
+                    page, record["card"], record["src"], script_timeout_ms
+                )
+
+        for start in range(0, len(records), 8):
+            batch = records[start:start + 8]
+            previews = await asyncio.gather(*(extract(record) for record in batch), return_exceptions=True)
+            for record, preview in zip(batch, previews):
+                if isinstance(preview, Exception):
+                    preview = {
+                        "mediaUrl": None,
+                        "previewImageUrl": None,
+                        "previewText": None,
+                        "mediaType": None,
+                        "productName": None,
+                        "packageName": None,
+                        "copyText": None,
+                    }
+                is_video = (
+                    preview["mediaType"] == "VIDEO"
+                    or "videocam" in record["card_text"]
+                    or record["has_video_icon"]
+                )
+                media_type = "VIDEO" if is_video else preview["mediaType"]
+                media_url = GoogleTransparencyWorker._normalize_media_url(preview["mediaUrl"])
+                preview_image_url = GoogleTransparencyWorker._normalize_media_url(preview["previewImageUrl"])
+                platform_data = {
+                    "versionId": record["version_id"],
+                    "cardLabel": record["label"],
+                    "previewScriptUrl": record["src"],
+                    "previewText": preview["previewText"],
+                    "previewImageUrl": preview_image_url,
+                    # 预览文案中通常包含竞品产品名；包名只有页面明确返回时才填入，不能臆造。
+                    "detectedProductName": preview["productName"],
+                    "detectedPackageName": preview["packageName"],
+                }
+                item = {
+                    "media": "GOOGLE_TRANSPARENCY_WEB",
+                    "externalAdID": record["creative_id"],
+                    "identityConfidence": "STABLE",
+                    "advertiserID": advertiser_id,
+                    "advertiserName": advertiser,
+                    "region": region,
+                    "format": media_type or "UNKNOWN",
+                    # 标准列用于 CMS 直接展示，完整预览文案仍保存在 platformData 中。
+                    "title": preview["productName"],
+                    "copyText": preview["copyText"],
+                    "versionId": record["version_id"],
+                    "cardLabel": record["label"],
+                    "creativeUrl": record["detail_url"] or (
+                        f"https://adstransparency.google.com/advertiser/{advertiser_id}/creative/{record['creative_id']}?region={region}"
+                        if advertiser_id else None
+                    ),
+                    "sourceUrl": page.url,
+                    "previewScriptUrl": record["src"],
+                    "mediaUrl": media_url,
+                    "platformData": platform_data,
+                }
+                result.append(item)
+                if max_results is not None and len(result) >= max_results:
+                    return result[:max_results]
         return result if max_results is None else result[:max_results]
 
     @staticmethod
@@ -176,6 +269,15 @@ class GoogleTransparencyWorker(BaseWorker):
         except (TypeError, ValueError):
             return None
         return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _parse_positive_int(value: object, default: int) -> int:
+        """解析正整数配置，错误或非正数使用默认值。"""
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if parsed > 0 else default
 
     @staticmethod
     def _resolve_region(payload: dict) -> str:
@@ -191,7 +293,7 @@ class GoogleTransparencyWorker(BaseWorker):
     async def _load_more_creatives(page, max_results: int | None, wait_ms: int) -> None:
         """滚动 Google 广告主页面加载更多素材，直到达到上限或页面不再增长。"""
         stable_rounds = 0
-        max_rounds = min(max_results * 20 if max_results else 100, 100)
+        max_rounds = min(max_results * 20 if max_results else 300, 300)
         creatives = page.locator("creative")
         for _ in range(max_rounds):
             count_before = await creatives.count()
@@ -204,7 +306,7 @@ class GoogleTransparencyWorker(BaseWorker):
                 stable_rounds += 1
             else:
                 stable_rounds = 0
-            if stable_rounds >= 3:
+            if stable_rounds >= 5:
                 return
 
     @staticmethod
@@ -213,8 +315,23 @@ class GoogleTransparencyWorker(BaseWorker):
         return bool(value and re.match(r"^https?://", value, re.I))
 
     @staticmethod
-    async def _extract_preview(card) -> dict[str, str | None]:
-        """读取 Google 预览 iframe 内的图片、视频地址和可见文案。"""
+    def _normalize_media_url(value: str | None) -> str | None:
+        """把 Google 返回的协议相对媒体地址规范化为可下载的 HTTPS 地址。"""
+        if not value:
+            return None
+        normalized = value.strip()
+        # Google 的预览脚本有时把查询分隔符按 JavaScript 字符串转义返回，
+        # 例如 `\\=` 和 `\\&`。还原后 Java Manager 才能直接下载视频。
+        normalized = re.sub(r"\\([/?=&:#])", r"\1", normalized)
+        if normalized.startswith("//"):
+            normalized = "https:" + normalized
+        return normalized if GoogleTransparencyWorker._is_http_url(normalized) else None
+
+    @staticmethod
+    async def _extract_preview(
+        page, card, preview_script_url: str | None, script_timeout_ms: int
+    ) -> dict[str, str | None]:
+        """读取 Google 预览脚本和 iframe 内的图片、视频地址及可见文案。"""
         result: dict[str, str | None] = {
             "mediaUrl": None,
             "previewImageUrl": None,
@@ -224,6 +341,11 @@ class GoogleTransparencyWorker(BaseWorker):
             "packageName": None,
             "copyText": None,
         }
+        script_preview = await GoogleTransparencyWorker._extract_script_preview(
+            page, preview_script_url, script_timeout_ms
+        )
+        result.update({key: value for key, value in script_preview.items() if value})
+        script_media_type = script_preview["mediaType"]
         outer_iframes = card.locator("iframe")
         if not await outer_iframes.count():
             return result
@@ -264,7 +386,7 @@ class GoogleTransparencyWorker(BaseWorker):
                         result["previewImageUrl"] = image_url
                         if not video_url and result["mediaType"] is None:
                             result["mediaType"] = "IMAGE"
-                if video_url:
+                if video_url and (not result["mediaUrl"] or script_media_type != "VIDEO"):
                     result["mediaUrl"] = video_url
                 elif result["previewImageUrl"] and not result["mediaUrl"]:
                     result["mediaUrl"] = result["previewImageUrl"]
@@ -272,6 +394,66 @@ class GoogleTransparencyWorker(BaseWorker):
             # 单个广告的预览 iframe 可能被浏览器阻断，不能因此丢弃整页其他素材。
             return result
         return result
+
+    @staticmethod
+    async def _extract_script_preview(
+        page, preview_script_url: str | None, timeout_ms: int
+    ) -> dict[str, str | None]:
+        """从 Google 预览脚本内的 VAST 片段提取带签名的视频和缩略图地址。"""
+        result = {"mediaUrl": None, "previewImageUrl": None, "mediaType": None}
+        if not preview_script_url:
+            return result
+        try:
+            response = await page.context.request.get(
+                preview_script_url,
+                headers={"Referer": page.url, "User-Agent": "Mozilla/5.0"},
+                timeout=timeout_ms,
+            )
+            if not response.ok:
+                return result
+            source = await response.text()
+            source = GoogleTransparencyWorker._decode_preview_script(source)
+            video_match = re.search(
+                r"//[^\"'\s<>]+googlevideo\.com/videoplayback\?[^\"'\s<>]+",
+                source,
+                re.IGNORECASE,
+            )
+            image_matches = re.findall(
+                r"(?:(?:https?:)?//)(?:i\d+\.ytimg\.com|tpc\.googlesyndication\.com/simgad/|lh\d+\.googleusercontent\.com)/[^\"'\s<>]+",
+                source,
+                re.IGNORECASE,
+            )
+            if video_match:
+                result["mediaUrl"] = GoogleTransparencyWorker._normalize_media_url(
+                    video_match.group(0).rstrip("]")
+                )
+                result["mediaType"] = "VIDEO"
+            if image_matches:
+                preferred_image = next(
+                    (url for url in image_matches if "ytimg.com" in url or "/simgad/" in url),
+                    image_matches[0],
+                )
+                image_url = re.split(r"\);|,", preferred_image, maxsplit=1)[0]
+                result["previewImageUrl"] = GoogleTransparencyWorker._normalize_media_url(image_url)
+        except Exception:
+            # 预览签名过期或脚本请求被拦截时，仍保留 iframe 解析结果。
+            return result
+        return result
+
+    @staticmethod
+    def _decode_preview_script(source: str) -> str:
+        """还原 Google 脚本中使用的十六进制转义和 HTML 实体。"""
+        decoded = re.sub(
+            r"\\x([0-9a-fA-F]{2})",
+            lambda match: chr(int(match.group(1), 16)),
+            source,
+        )
+        decoded = re.sub(
+            r"\\u([0-9a-fA-F]{4})",
+            lambda match: chr(int(match.group(1), 16)),
+            decoded,
+        )
+        return html.unescape(decoded).replace("\\/", "/")
 
     @staticmethod
     def _parse_preview_text(text: str | None) -> dict[str, str | None]:

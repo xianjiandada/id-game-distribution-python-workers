@@ -57,12 +57,8 @@ class JobView(BaseModel):
     worker: str
     status: JobStatus
     payload: dict[str, Any]
-    # 查询配置 ID，用于把一次抓取归属到具体的产品查询条件。
+    # 查询配置 ID，用于把一次抓取归属到具体的查询条件。
     queryID: int | str | None = None
-    # 产品在 Java Manager 中的 appID；同一个 Worker 可以服务多个产品。
-    appID: int | str | None = None
-    # 产品名称快照，避免产品改名后历史运行记录无法识别。
-    productName: str | None = None
     # 本次运行使用的搜索词或广告主名称快照。
     keyword: str | None = None
     # 统一平台来源快照，避免 Java 只能根据 Worker 名称猜来源。
@@ -71,6 +67,9 @@ class JobView(BaseModel):
     windowStart: datetime | None = None
     windowEnd: datetime | None = None
     proxyProfile: str | None = None
+    proxyRequired: bool = False
+    restrictionType: str | None = None
+    restrictionEvidence: str | None = None
     fetchedCount: int = 0
     newCount: int = 0
     updatedCount: int = 0
@@ -91,6 +90,8 @@ class WorkerResult(BaseModel):
     items: list[dict[str, Any]] = Field(default_factory=list)
     errorCode: str | None = None
     errorMessage: str | None = None
+    restrictionType: str | None = None
+    restrictionEvidence: str | None = None
 
 
 class CallbackPayload(BaseModel):
@@ -99,10 +100,8 @@ class CallbackPayload(BaseModel):
     jobID: str
     worker: str
     status: JobStatus
-    # 查询配置和产品维度，Java 入库后可以按产品、搜索词和日期统计。
+    # 查询配置上下文，Java 入库后按查询、平台、搜索词和日期统计。
     queryID: int | str | None = None
-    appID: int | str | None = None
-    productName: str | None = None
     keyword: str | None = None
     media: str | None = None
     # 采集日期和采集时间，分别用于按天汇总和精确审计。
@@ -111,9 +110,13 @@ class CallbackPayload(BaseModel):
     # 查询窗口快照，重试时保持原窗口，避免日报边界漂移。
     windowStart: datetime | None = None
     windowEnd: datetime | None = None
+    proxyProfile: str | None = None
+    proxyRequired: bool = False
     fetchedCount: int = 0
     newCount: int = 0
     updatedCount: int = 0
     items: list[dict[str, Any]] = Field(default_factory=list)
     errorCode: str | None = None
     errorMessage: str | None = None
+    restrictionType: str | None = None
+    restrictionEvidence: str | None = None

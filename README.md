@@ -5,7 +5,7 @@
 ## 当前能力
 
 - FastAPI 内部任务 API：提交任务后立即返回 `jobID`。
-- Worker 注册和路由：`mock`、`meta_library`、`google_transparency`。
+- Worker 注册和路由：`meta_library`、`google_transparency`、`tiktok_ads_library`。
 - 异步执行、任务状态查询、失败回调和运行结果回调。
 - Meta Ads Library 公开网页抓取和 Google Ads Transparency 网页搜索抓取。
 - Java Manager 回调契约，以及 Ubuntu + 宝塔面板的原生进程部署方案。
@@ -59,9 +59,9 @@ Invoke-RestMethod http://127.0.0.1:13371/health
 Invoke-RestMethod http://127.0.0.1:13371/workers
 ```
 
-健康检查应返回 `status: UP`，Worker 列表应包含 `mock`、`meta_library` 和 `google_transparency`。接口调试页：<http://127.0.0.1:13371/docs>。`/health` 只说明 API 存活，不代表 Chromium、代理或 Java 回调已经验证。
+健康检查应返回 `status: UP`，Worker 列表应包含 `meta_library` 和 `google_transparency`。接口调试页：<http://127.0.0.1:13371/docs>。`/health` 只说明 API 存活，不代表 Chromium、代理或 Java 回调已经验证。
 
-**单独启动 Python 服务不需要先启动 Java、MySQL 或 Redis**，本服务使用 SQLite。Java 联调复用 Java 项目现有测试数据库和依赖，不另建 MySQL / Redis，也不使用旧 `docker-compose.local.yml` 覆盖 Java 配置。完整 CMS 验收还需要 Quartz，步骤见[本地联调与验收](docs/本地验收.md)。默认 Manager 回调地址为 `http://127.0.0.1:13367/internal/creative/runs`，任务指定的 `callbackUrl` 优先。下方 Mock 不传 `runID` / `callbackUrl`，仅验证 Python。
+**单独启动 Python 服务不需要先启动 Java、MySQL 或 Redis**，本服务使用 SQLite。Java 联调复用 Java 项目现有测试数据库和依赖，不另建 MySQL / Redis，也不使用旧 `docker-compose.local.yml` 覆盖 Java 配置。完整 CMS 验收还需要 Quartz，步骤见[本地联调与验收](docs/本地验收.md)。默认 Manager 回调地址为 `http://127.0.0.1:13367/admin/creative/runs`，任务指定的 `callbackUrl` 优先。下方 Mock 不传 `runID` / `callbackUrl`，仅验证 Python。
 
 需要自动重载时，在项目根目录运行（仅用于开发，重载会丢失内存任务）：
 
@@ -82,16 +82,7 @@ Invoke-RestMethod http://127.0.0.1:13371/workers
 
 任务完成后，Python 将运行审计和最新素材写入 `DATABASE_PATH`（默认 `data/worker.db`），相同 `media + externalAdID` 只保留一条，素材上的查询上下文随最新结果更新。正常 Java 链路由 Quartz 先创建 `advert_creative_run`，Manager 收到回调后更新运行状态、upsert 素材；Python 抓取成功不代表 Java 入库成功。
 
-任务参数 `payload.maxResults` 为结果条数上限；`0`、空值或不传表示不设条数上限，但仍受最多 100 轮滚动、连续 3 轮卡片数量不增长及任务超时限制，不保证拿到平台全部素材。验证挑战可能返回 `WAITING_MANUAL`，无结果或其他异常也可能返回 `FAILED`。
-
-提交一个 Mock 任务：
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:13371/jobs -Method Post -ContentType 'application/json' -Body (@{
-  worker = 'mock'
-  payload = @{ items = @(@{ externalAdID = 'demo-1'; copyText = 'demo' }) }
-} | ConvertTo-Json -Depth 8)
-```
+任务参数 `payload.maxResults` 为结果条数上限；`0`、空值或不传表示不设条数上限，但仍受滚动轮次、连续 5 轮卡片数量不增长及任务超时限制。验证挑战可能返回 `WAITING_MANUAL`，无结果或其他异常也可能返回 `FAILED`。回调会附带 `restrictionType` 和 `restrictionEvidence`，便于按限制类型配置代理重试。
 
 ## 两个平台快速烟测
 

@@ -10,16 +10,16 @@ from .proxy import ProxyUnavailable
 from .service import JobService
 from .workers.google_transparency.worker import GoogleTransparencyWorker
 from .workers.meta_library.worker import MetaLibraryWorker
-from .workers.mock_worker import MockWorker
+from .workers.tiktok_ads_library.worker import TikTokAdsLibraryWorker
 
 
 def create_app() -> FastAPI:
     """创建 FastAPI 应用并注册内置 Worker。"""
     app = FastAPI(title=settings.app_name, version="0.1.0")
     registry = WorkerRegistry()
-    registry.register(MockWorker())
     registry.register(MetaLibraryWorker())
     registry.register(GoogleTransparencyWorker())
+    registry.register(TikTokAdsLibraryWorker())
     app.state.registry = registry
     app.state.jobs = JobService(registry, JavaCallbackClient(settings), settings)
 

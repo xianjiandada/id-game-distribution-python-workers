@@ -51,11 +51,11 @@ class MetaLibraryWorker(BaseWorker):
         # 未传国家或地区时按全部地区查询，避免误回退到某个默认国家。
         country_codes = payload.get("countryCodes") or [payload.get("country") or "ALL"]
         params = {
-            "activeStatus": payload.get("activeStatus", "active"),
+            "active_status": str(payload.get("activeStatus") or "active").lower(),
             "ad_type": payload.get("adType", "all"),
             "country": country_codes[0],
             "is_targeted_country": "false",
-            "mediaType": payload.get("mediaType", "all"),
+            "media_type": str(payload.get("mediaType") or "all").lower(),
             "search_type": "keyword_unordered",
             "sort_data[mode]": "total_impressions",
             "sort_data[direction]": "desc",
@@ -98,6 +98,20 @@ class MetaLibraryWorker(BaseWorker):
             images = card.locator("img")
             media_urls = [await images.nth(i).get_attribute("src") for i in range(await images.count())]
             media_urls = [url for url in media_urls if url]
+            videos = card.locator("video")
+            video_urls: list[str] = []
+            for video_index in range(await videos.count()):
+                video = videos.nth(video_index)
+                video_src = await video.get_attribute("src")
+                if video_src:
+                    video_urls.append(video_src)
+                sources = video.locator("source")
+                for source_index in range(await sources.count()):
+                    source_url = await sources.nth(source_index).get_attribute("src")
+                    if source_url:
+                        video_urls.append(source_url)
+            video_urls = [url for url in video_urls if re.match(r"^https?://", url, re.I)]
+            video_url = video_urls[0] if video_urls else None
             items.append(
                 {
                     "media": "META_LIBRARY_WEB",
@@ -106,9 +120,8 @@ class MetaLibraryWorker(BaseWorker):
                     "advertiserName": advertiser,
                     "copyText": copy_text,
                     # Ads Library 当前公开卡片主要返回图片缩略图；明确写入类型，避免 Java/CMS 把图片误判为未知。
-                    "mediaType": "IMAGE" if media_urls else "UNKNOWN",
+                    "mediaType": "VIDEO" if video_url else "IMAGE" if media_urls else "UNKNOWN",
                     "startedText": started,
-                    "regions": payload.get("countryCodes") or [payload.get("country") or "ALL"],
                     # Meta 页面字段可能随版本变化，保留有用的原始筛选和投放信息。
                     "platformData": {
                         "startedText": started,
@@ -118,7 +131,7 @@ class MetaLibraryWorker(BaseWorker):
                     },
                     "advertiserUrl": hrefs[0] if hrefs else None,
                     "landingUrl": hrefs[1] if len(hrefs) > 1 else None,
-                    "mediaUrl": media_urls[-1] if media_urls else None,
+                    "mediaUrl": video_url or (media_urls[-1] if media_urls else None),
                     "snapshotUrl": f"https://www.facebook.com/ads/library/?id={external_id}",
                     "sourceUrl": page.url,
                 }

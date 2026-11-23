@@ -16,8 +16,6 @@ def test_job_store_persists_job_and_deduplicates_items(tmp_path):
         status=JobStatus.SUCCESS,
         payload={"keyword": "螺丝"},
         queryID=20001,
-        appID=1001,
-        productName="示例产品",
         keyword="螺丝",
         fetchedCount=1,
         newCount=1,
@@ -40,5 +38,5 @@ def test_job_store_persists_job_and_deduplicates_items(tmp_path):
         assert json.loads(row)["copyText"] == "B"
         # 新库不再建逐次观察表，避免按任务复制整份素材。
         assert connection.execute("select count(*) from sqlite_master where name = 'worker_item_observation'").fetchone()[0] == 0
-        job_row = connection.execute("select queryID, appID, productName, keyword from worker_job").fetchone()
-        assert tuple(job_row) == ("20001", "1001", "示例产品", "螺丝")
+        job_row = connection.execute("select queryID, keyword from worker_job").fetchone()
+        assert tuple(job_row) == ("20001", "螺丝")
