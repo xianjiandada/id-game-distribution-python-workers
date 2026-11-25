@@ -92,6 +92,9 @@ class JobService:
             normalized.setdefault("queryID", job.queryID)
             normalized.setdefault("keyword", job.keyword)
             normalized.setdefault("media", job.media)
+            configured_function = job.payload.get("creativeFunction")
+            if configured_function and not normalized.get("creativeFunction"):
+                normalized["creativeFunction"] = configured_function
             # 内容指纹忽略查询上下文，避免同一素材被不同搜索词发现时误判为内容更新。
             normalized.setdefault("contentHash", _content_hash(normalized))
             job.items.append(normalized)
