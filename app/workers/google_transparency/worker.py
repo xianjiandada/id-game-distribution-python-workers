@@ -1,7 +1,10 @@
 import asyncio
 import html
+import json
 import re
-from urllib.parse import urlencode, urljoin
+from urllib.parse import quote, urlencode, urljoin
+
+import httpx
 
 from playwright.async_api import Error as PlaywrightError, async_playwright
 
@@ -16,6 +19,12 @@ class GoogleTransparencyWorker(BaseWorker):
 
     name = "google_transparency"
 
+    _ATC_RPC = "https://adstransparency.google.com/anji/_/rpc/"
+    _ATC_GEO = 2344
+    _ATC_PAGE_SIZE = 40
+    _ATC_MAX_CREATIVES = 500
+    _ADVERTISER_ID = re.compile(r"^AR\d{10,}$", re.IGNORECASE)
+
     async def run(self, payload: dict) -> WorkerResult:
         """通过 Google Ads Transparency 公开网页搜索广告主，不调用 Google Ads API。"""
         keyword = str(payload.get("keyword") or "").strip()
@@ -25,6 +34,9 @@ class GoogleTransparencyWorker(BaseWorker):
                 errorCode="GOOGLE_ADVERTISER_REQUIRED",
                 errorMessage="必须提供 keyword",
             )
+
+        if GoogleTransparencyWorker._is_advertiser_id(keyword):
+            return await self._run_atc(payload, keyword.upper())
 
         # Google 未填写国家/地区时使用 ANYWHERE；宿主按地区分别调用。
         region = GoogleTransparencyWorker._resolve_region(payload)
@@ -101,6 +113,204 @@ class GoogleTransparencyWorker(BaseWorker):
                 return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_BROWSER_EXCEPTION", errorMessage=str(exc)[:500])
             finally:
                 await browser.close()
+
+    @classmethod
+    def _is_advertiser_id(cls, value: str | None) -> bool:
+        """识别 Google Ads Transparency 的 AR 广告主 ID。"""
+        return bool(cls._ADVERTISER_ID.fullmatch(str(value or "").strip()))
+
+    @classmethod
+    def _atc_search_payload(cls, advertiser_id: str, page_token: str | None = None) -> dict:
+        payload = {
+            "2": cls._ATC_PAGE_SIZE,
+            "3": {"12": {"1": "", "2": True}, "13": {"1": [advertiser_id]}},
+            "7": {"1": 1, "2": 0, "3": cls._ATC_GEO},
+        }
+        if page_token:
+            payload["4"] = page_token
+        return payload
+
+    @classmethod
+    async def _atc_rpc(cls, client: httpx.AsyncClient, method: str, payload: dict) -> dict:
+        """调用 ATC 内部 RPC。该接口按 f.req 接收 JSON，而不是普通 REST JSON。"""
+        body = "f.req=" + quote(json.dumps(payload, separators=(",", ":")))
+        last_error = "unknown"
+        for attempt in range(3):
+            try:
+                response = await client.post(
+                    cls._ATC_RPC + method + "?authuser=",
+                    content=body.encode("utf-8"),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+            except httpx.HTTPError as exc:
+                last_error = str(exc)
+                if attempt < 2:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                raise RuntimeError(f"ATC 请求失败：{last_error}") from exc
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                except ValueError as exc:
+                    raise RuntimeError("ATC 返回不是合法 JSON") from exc
+                if isinstance(data, dict):
+                    return data
+                raise RuntimeError("ATC 返回结构异常")
+            last_error = f"HTTP {response.status_code}"
+            if response.status_code == 429 and attempt < 2:
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            break
+        raise RuntimeError(f"ATC {method} 失败：{last_error}")
+
+    @classmethod
+    async def _atc_preview_urls(cls, client: httpx.AsyncClient, advertiser_id: str, item: dict) -> list[str]:
+        """读取搜索结果中的预览 URL，缺失时按创意 ID 查询详情。"""
+        urls: list[str] = []
+        creative = item.get("3") or {}
+        if isinstance(creative, dict):
+            first = creative.get("1") or {}
+            if isinstance(first, dict) and first.get("4"):
+                urls.append(str(first["4"]))
+        if urls:
+            return urls
+        creative_id = str(item.get("2") or "").strip()
+        if not creative_id:
+            return urls
+        try:
+            data = await cls._atc_rpc(client, "LookupService/GetCreativeById", {
+                "1": advertiser_id,
+                "2": creative_id,
+                "5": {"1": 1, "2": 0, "3": cls._ATC_GEO},
+            })
+        except RuntimeError:
+            return urls
+        groups = (data.get("1") or {}).get("5") if isinstance(data.get("1"), dict) else []
+        for group in groups or []:
+            if isinstance(group, dict) and isinstance(group.get("1"), dict) and group["1"].get("4"):
+                urls.append(str(group["1"]["4"]))
+        return list(dict.fromkeys(urls))
+
+    @classmethod
+    def _parse_atc_preview(cls, source: str) -> dict[str, str | None]:
+        """解析 ATC 预览脚本中的应用文案、媒体地址和 YouTube ID。"""
+        decoded = re.sub(r"\\([/?=&:#])", r"\1", cls._decode_preview_script(source))
+        app_name = None
+        package_name = None
+        for field, target in (("appName", "app_name"), ("appId", "package_name")):
+            match = re.search(r"['\"]" + field + r"['\"]\s*:\s*['\"]([^'\"]{1,500})", decoded)
+            if match:
+                if target == "app_name":
+                    app_name = " ".join(match.group(1).split())
+                else:
+                    package_name = " ".join(match.group(1).split())
+        texts: list[str] = []
+        for field in ("headline", "description", "description1", "description2", "longHeadline", "title"):
+            for match in re.finditer(r"['\"]" + field + r"['\"]\s*:\s*['\"]([^'\"]{1,2000})", decoded, re.I):
+                value = " ".join(match.group(1).split())
+                if value and value not in texts:
+                    texts.append(value)
+        preview_text = "\n".join(texts[:20]) or None
+        parsed = cls._parse_preview_text(preview_text)
+        copy_text = "\n".join(texts[:10])[:4000] or None
+        video_id = cls._extract_youtube_video_id(decoded)
+        video_match = re.search(r"(?:(?:https?:)?//)[^\"'<>\s]+googlevideo\.com/videoplayback\?[^\"'<>\s]+", decoded, re.I)
+        image_match = re.search(r"(?:(?:https?:)?//)(?:i\d+\.ytimg\.com|tpc\.googlesyndication\.com/simgad/|lh\d+\.googleusercontent\.com)/[^\"'<>\s]+", decoded, re.I)
+        media_url = cls._normalize_media_url(video_match.group(0).rstrip("])")) if video_match else None
+        image_url = cls._normalize_media_url(image_match.group(0).rstrip("])")) if image_match else None
+        return {
+            "previewText": preview_text,
+            "productName": app_name or parsed["productName"],
+            "packageName": package_name or parsed["packageName"],
+            "copyText": copy_text or parsed["copyText"],
+            "mediaUrl": media_url or image_url,
+            "previewImageUrl": image_url,
+            "mediaType": "VIDEO" if media_url else ("IMAGE" if image_url else None),
+            "youtubeVideoId": video_id,
+        }
+
+    async def _run_atc(self, payload: dict, advertiser_id: str) -> WorkerResult:
+        """按案例项目的 ATC RPC 直接查询广告主 ID，绕过网页搜索联想。"""
+        region = self._resolve_region(payload)
+        max_results = self._parse_max_results(payload.get("maxResults")) or self._ATC_MAX_CREATIVES
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": f"https://adstransparency.google.com/advertiser/{advertiser_id}?region={region}",
+        }
+        timeout = httpx.Timeout(self._parse_positive_int(payload.get("requestTimeoutMs"), 30000) / 1000)
+        items: list[dict] = []
+        token = ""
+        scanned = 0
+        try:
+            async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
+                while scanned < max_results:
+                    data = await self._atc_rpc(client, "SearchService/SearchCreatives", self._atc_search_payload(advertiser_id, token))
+                    page = data.get("1") or []
+                    if not page:
+                        break
+                    for creative in page:
+                        if scanned >= max_results:
+                            break
+                        scanned += 1
+                        creative_id = str(creative.get("2") or "").strip()
+                        if not creative_id:
+                            continue
+                        preview_urls = await self._atc_preview_urls(client, advertiser_id, creative)
+                        preview = {}
+                        for preview_url in preview_urls:
+                            try:
+                                response = await client.get(preview_url)
+                                if response.is_success:
+                                    preview = self._parse_atc_preview(response.text)
+                                    if preview.get("mediaUrl") or preview.get("youtubeVideoId") or preview.get("copyText"):
+                                        break
+                            except httpx.HTTPError:
+                                continue
+                        creative_text = " ".join(filter(None, [
+                            preview.get("previewText"), preview.get("productName"), preview.get("copyText")
+                        ]))
+                        item = {
+                            "media": "GOOGLE_TRANSPARENCY_WEB",
+                            "externalAdID": creative_id,
+                            "identityConfidence": "STABLE",
+                            "advertiserID": advertiser_id,
+                            "advertiserName": str(creative.get("12") or "") or None,
+                            "region": region,
+                            "format": preview.get("mediaType") or "UNKNOWN",
+                            "title": preview.get("productName"),
+                            "copyText": preview.get("copyText"),
+                            "creativeUrl": f"https://adstransparency.google.com/advertiser/{advertiser_id}/creative/{creative_id}?region={region}",
+                            "sourceUrl": f"https://adstransparency.google.com/advertiser/{advertiser_id}?region={region}",
+                            "mediaUrl": preview.get("mediaUrl"),
+                            "previewImageUrl": preview.get("previewImageUrl"),
+                            "youtubeVideoId": preview.get("youtubeVideoId"),
+                            "creativeFunction": self._infer_function(creative_text),
+                            "language": self._infer_language(creative_text),
+                            "platformData": {
+                                "source": "ATC_RPC",
+                                "creativeId": creative_id,
+                                "lastShown": creative.get("7"),
+                                "previewUrls": preview_urls,
+                                "previewText": preview.get("previewText"),
+                                "packageName": preview.get("packageName"),
+                            },
+                        }
+                        items.append(item)
+                    token = str(data.get("2") or "")
+                    if not token or len(page) < self._ATC_PAGE_SIZE:
+                        break
+            items = await enrich_youtube_metadata(items)
+            for item in items:
+                if not item.get("creativeFunction"):
+                    item["creativeFunction"] = self._infer_function(" ".join(filter(None, [
+                        item.get("title"), item.get("copyText"), item.get("youtubeTitle")
+                    ])))
+            if not items:
+                return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_CREATIVES_UNREADABLE", errorMessage=f"ATC 未解析到广告主素材：{advertiser_id}")
+            return WorkerResult(fetchedCount=len(items), newCount=len(items), items=items)
+        except (RuntimeError, httpx.HTTPError) as exc:
+            return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_ATC_REQUEST_FAILED", errorMessage=str(exc)[:500])
 
     @staticmethod
     async def _load_delivery_regions(context, items):
@@ -339,6 +549,7 @@ class GoogleTransparencyWorker(BaseWorker):
         # Google 的预览脚本有时把查询分隔符按 JavaScript 字符串转义返回，
         # 例如 `\\=` 和 `\\&`。还原后 Java Manager 才能直接下载视频。
         normalized = re.sub(r"\\([/?=&:#])", r"\1", normalized)
+        normalized = normalized.split(");", 1)[0]
         if normalized.startswith("//"):
             normalized = "https:" + normalized
         return normalized if GoogleTransparencyWorker._is_http_url(normalized) else None

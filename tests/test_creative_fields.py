@@ -40,5 +40,31 @@ def test_google_infers_function_from_ad_copy() -> None:
     assert GoogleTransparencyWorker._infer_function("Phone cleaner and junk remover") == "清理"
 
 
+def test_google_advertiser_id_uses_atc_shape() -> None:
+    assert GoogleTransparencyWorker._is_advertiser_id("AR07288362499752067073")
+    assert not GoogleTransparencyWorker._is_advertiser_id("AR123")
+    payload = GoogleTransparencyWorker._atc_search_payload(
+        "AR07288362499752067073", "next-page"
+    )
+    assert payload["3"]["13"]["1"] == ["AR07288362499752067073"]
+    assert payload["4"] == "next-page"
+
+
+def test_google_atc_preview_parser_reads_video_and_copy() -> None:
+    preview = GoogleTransparencyWorker._parse_atc_preview(
+        """
+        google_template_data: {'adData': [{'appName': 'Recover Photos',
+        'description1': 'Data Recovery for deleted files',
+        'appId': 'com.example.recovery'}]}
+        https://rr1---sn.googlevideo.com/videoplayback?source=youtube
+        https://i.ytimg.com/vi/I0JD5LZONUk/hqdefault.jpg
+        """
+    )
+    assert preview["productName"] == "Recover Photos"
+    assert preview["packageName"] == "com.example.recovery"
+    assert preview["mediaType"] == "VIDEO"
+    assert preview["youtubeVideoId"] == "I0JD5LZONUk"
+
+
 def test_meta_common_fields_use_same_language_and_function_rules() -> None:
     assert MetaLibraryWorker._parse_started_date("Started running on Nov 20, 2026") == "2026-11-20"
