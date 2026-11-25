@@ -31,7 +31,6 @@ def _ensure_table(connection: sqlite3.Connection) -> None:
         """CREATE TABLE IF NOT EXISTS youtube_video_meta (
             video_id TEXT PRIMARY KEY,
             title TEXT,
-            duration_seconds INTEGER,
             view_count INTEGER,
             language TEXT,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -49,7 +48,7 @@ def _lookup(video_ids: list[str], database_path: str) -> dict[str, dict[str, Any
         _ensure_table(connection)
         placeholders = ",".join("?" for _ in video_ids)
         rows = connection.execute(
-            "SELECT video_id, title, duration_seconds, view_count, language "
+            "SELECT video_id, title, view_count, language "
             f"FROM youtube_video_meta WHERE video_id IN ({placeholders})",
             video_ids,
         ).fetchall()
@@ -63,14 +62,13 @@ def _store(video_id: str, metadata: dict[str, Any], database_path: str) -> None:
         _ensure_table(connection)
         connection.execute(
             "INSERT INTO youtube_video_meta "
-            "(video_id, title, duration_seconds, view_count, language) VALUES (?, ?, ?, ?, ?) "
+            "(video_id, title, view_count, language) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(video_id) DO UPDATE SET title=excluded.title, "
-            "duration_seconds=excluded.duration_seconds, view_count=excluded.view_count, "
-            "language=excluded.language, updated_at=CURRENT_TIMESTAMP",
+            "view_count=excluded.view_count, language=excluded.language, "
+            "updated_at=CURRENT_TIMESTAMP",
             (
                 video_id,
                 metadata.get("title") or "",
-                int(metadata.get("duration_seconds") or 0),
                 int(metadata.get("view_count") or 0),
                 metadata.get("language") or "",
             ),
@@ -108,7 +106,7 @@ def _fetch_sync(video_id: str) -> dict[str, Any] | None:
     oembed = _fetch_oembed(video_id)
     if oembed:
         # oEmbed 的标题足够用于页面展示和语言判断，其他数值字段继续由 yt-dlp 补充。
-        return {**oembed, "duration_seconds": 0, "view_count": 0, "language": ""}
+        return {**oembed, "view_count": 0, "language": ""}
     command = [
         sys.executable,
         "-m",
@@ -143,14 +141,13 @@ def _fetch_sync(video_id: str) -> dict[str, Any] | None:
         return None
     return {
         "title": str(payload.get("title") or "").strip(),
-        "duration_seconds": int(float(payload.get("duration") or 0)),
         "view_count": int(payload.get("view_count") or 0),
         "language": str(payload.get("language") or payload.get("original_language") or "").strip(),
     }
 
 
 async def enrich(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """为素材补充 YouTube URL、标题、时长和播放量，并写入本地缓存。"""
+    """为素材补充 YouTube URL、标题和播放量，并写入本地缓存。"""
     ids = list(dict.fromkeys(str(item.get("youtubeVideoId") or "").strip() for item in items))
     ids = [video_id for video_id in ids if _ID_PATTERN.fullmatch(video_id)]
     if not ids:
@@ -176,7 +173,6 @@ async def enrich(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         metadata = cached.get(video_id)
         if metadata:
             item["youtubeTitle"] = metadata.get("title") or None
-            item["youtubeDurationSeconds"] = int(metadata.get("duration_seconds") or 0) or None
             item["youtubeViewCount"] = int(metadata.get("view_count") or 0)
             if metadata.get("language"):
                 item["language"] = metadata["language"]

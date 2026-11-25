@@ -35,7 +35,6 @@ def _preview(item: dict[str, Any]) -> dict[str, Any]:
             "youtubeVideoId",
             "youtubeVideoUrl",
             "youtubeTitle",
-            "youtubeDurationSeconds",
             "youtubeViewCount",
             "language",
             "creativeFunction",
