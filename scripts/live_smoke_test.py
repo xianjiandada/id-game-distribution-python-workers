@@ -11,9 +11,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.config import settings  # noqa: E402
 from app.models import JobStatus, WorkerResult  # noqa: E402
-from app.proxy import ProxyResolver  # noqa: E402
 from app.workers.google_transparency.worker import GoogleTransparencyWorker  # noqa: E402
 from app.workers.meta_library.worker import MetaLibraryWorker  # noqa: E402
 
@@ -34,6 +32,13 @@ def _preview(item: dict[str, Any]) -> dict[str, Any]:
             "creativeUrl",
             "snapshotUrl",
             "previewScriptUrl",
+            "youtubeVideoId",
+            "youtubeVideoUrl",
+            "youtubeTitle",
+            "youtubeDurationSeconds",
+            "youtubeViewCount",
+            "language",
+            "creativeFunction",
         )
         if item.get(key) is not None
     }
@@ -44,11 +49,9 @@ async def _run_worker(
     worker: Any,
     payload: dict[str, Any],
     query: dict[str, str],
-    proxy_profile: str | None,
 ) -> dict[str, Any]:
     """执行单个平台并转换成适合终端查看的结果。"""
-    proxy = ProxyResolver(settings).resolve(proxy_profile, required=False)
-    result: WorkerResult = await worker.run(payload, proxy.server if proxy else None)
+    result: WorkerResult = await worker.run(payload)
     return {
         "worker": name,
         "query": query,
@@ -63,7 +66,6 @@ async def _run_worker(
 async def _main(
     max_results: int,
     wait_ms: int,
-    proxy_profile: str | None,
     meta_keyword: str,
     google_advertiser: str,
     google_region: str,
@@ -100,7 +102,7 @@ async def _main(
     results: list[dict[str, Any]] = []
     for name, worker, payload, query in tasks:
         try:
-            results.append(await _run_worker(name, worker, payload, query, proxy_profile))
+            results.append(await _run_worker(name, worker, payload, query))
         except Exception as exc:  # noqa: BLE001 - 烟测要把平台异常显示给操作者
             results.append(
                 {
@@ -122,7 +124,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="执行 Meta 和 Google 公开网页抓取小规模烟测")
     parser.add_argument("--max-results", type=int, default=3, help="每个平台最多抓取多少条，默认 3")
     parser.add_argument("--wait-ms", type=int, default=4000, help="页面等待时间，默认 4000 毫秒")
-    parser.add_argument("--proxy-profile", help="可选逻辑代理 Profile，例如 google_hk")
     parser.add_argument("--meta-keyword", default="螺丝", help="Meta 搜索词，默认：螺丝")
     parser.add_argument(
         "--google-advertiser",
@@ -145,7 +146,6 @@ def main() -> int:
         _main(
             args.max_results,
             args.wait_ms,
-            args.proxy_profile,
             args.meta_keyword.strip(),
             args.google_advertiser.strip(),
             args.google_region.strip().upper(),

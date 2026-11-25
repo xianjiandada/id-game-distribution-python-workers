@@ -35,10 +35,6 @@ class JobSubmitRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     # 可选的任务级回调地址；生产建议使用服务端默认地址。
     callbackUrl: str | None = Field(default=None, max_length=500)
-    # 逻辑代理 Profile 名称，不直接接收带密码的代理地址。
-    proxyProfile: str | None = Field(default=None, max_length=80, pattern=r"^[a-zA-Z0-9_\-]+$")
-    # 为 true 时没有可用代理就拒绝任务，不允许降级直连。
-    proxyRequired: bool = False
 
 
 class JobSubmitResponse(BaseModel):
@@ -66,8 +62,6 @@ class JobView(BaseModel):
     # 固定的查询窗口，用于回调 Java 后按同一窗口重试和核对。
     windowStart: datetime | None = None
     windowEnd: datetime | None = None
-    proxyProfile: str | None = None
-    proxyRequired: bool = False
     restrictionType: str | None = None
     restrictionEvidence: str | None = None
     fetchedCount: int = 0
@@ -110,8 +104,6 @@ class CallbackPayload(BaseModel):
     # 查询窗口快照，重试时保持原窗口，避免日报边界漂移。
     windowStart: datetime | None = None
     windowEnd: datetime | None = None
-    proxyProfile: str | None = None
-    proxyRequired: bool = False
     fetchedCount: int = 0
     newCount: int = 0
     updatedCount: int = 0

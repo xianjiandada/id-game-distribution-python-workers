@@ -7,7 +7,7 @@ from itertools import zip_longest
 from ..models import JobStatus, WorkerResult
 
 
-async def collect_countries(worker, payload, proxy_url, timeout):
+async def collect_countries(worker, payload, timeout):
     codes = list(dict.fromkeys(str(v).strip().upper() for v in payload.get("countryCodes") or []))
     if any(v in ("ALL", "ANYWHERE") for v in codes):
         codes = []
@@ -27,7 +27,7 @@ async def collect_countries(worker, payload, proxy_url, timeout):
         budget = (deadline - asyncio.get_running_loop().time()) / (len(scopes) - index)
         request["_countryDeadline"] = asyncio.get_running_loop().time() + budget
         try:
-            result = await asyncio.wait_for(worker.run(request, proxy_url), budget)
+            result = await asyncio.wait_for(worker.run(request), budget)
         except asyncio.TimeoutError:
             result = WorkerResult(status=JobStatus.TIMEOUT, errorCode="JOB_TIMEOUT", errorMessage="地区查询超时")
         except Exception as exc:

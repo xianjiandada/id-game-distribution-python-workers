@@ -31,8 +31,6 @@ class Settings:
     job_timeout_seconds: int = _int_env("JOB_TIMEOUT_SECONDS", 900)
     # 同时执行的最大任务数，避免浏览器和出口连接过载。
     max_concurrent_jobs: int = _int_env("MAX_CONCURRENT_JOBS", 2)
-    # 未指定逻辑 Profile 时使用的默认代理地址。
-    proxy_default_url: str = os.getenv("PROXY_DEFAULT_URL", "")
     # Python 本地审计数据库路径。
     database_path: str = os.getenv("DATABASE_PATH", "data/worker.db")
 

@@ -8,7 +8,6 @@ from uuid import uuid4
 from .callback import CallbackSender
 from .config import Settings
 from .models import CallbackPayload, JobStatus, JobSubmitRequest, JobView, WorkerResult, utc_now
-from .proxy import ProxyLease, ProxyResolver
 from .storage import JobStore
 from .registry import WorkerRegistry
 from .workers.countries import collect_countries
@@ -17,7 +16,7 @@ from .workers.countries import collect_countries
 class JobService:
     """统一负责任务登记、并发控制、超时处理、本地审计和 Java 回调。"""
 
-    def __init__(self, registry: WorkerRegistry, callback: CallbackSender, settings: Settings, proxy_resolver: ProxyResolver | None = None, store: JobStore | None = None) -> None:
+    def __init__(self, registry: WorkerRegistry, callback: CallbackSender, settings: Settings, store: JobStore | None = None) -> None:
         """初始化宿主依赖和每个进程的任务运行状态。"""
         self.registry = registry
         self.callback = callback
@@ -26,14 +25,11 @@ class JobService:
         self.callback_urls: dict[str, str | None] = {}
         self.tasks: dict[str, asyncio.Task] = {}
         self.semaphore = asyncio.Semaphore(settings.max_concurrent_jobs)
-        self.proxy_resolver = proxy_resolver or ProxyResolver(settings)
         self.store = store or JobStore(settings.database_path)
-        self.proxies: dict[str, ProxyLease | None] = {}
 
     def submit(self, request: JobSubmitRequest) -> JobView:
-        """校验请求、解析代理、登记任务并立即创建后台协程。"""
+        """校验请求、登记任务并立即创建后台协程。"""
         self.registry.get(request.worker)
-        proxy = self.proxy_resolver.resolve(request.proxyProfile, request.proxyRequired)
         job_id = uuid4().hex
         job = JobView(
             jobID=job_id,
@@ -46,13 +42,10 @@ class JobService:
             media=_media_for_worker(request.worker),
             windowStart=request.payload.get("windowStart"),
             windowEnd=request.payload.get("windowEnd"),
-            proxyProfile=request.proxyProfile,
-            proxyRequired=request.proxyRequired,
             acceptedAt=utc_now(),
         )
         self.jobs[job_id] = job
         self.callback_urls[job_id] = request.callbackUrl
-        self.proxies[job_id] = proxy
         self.store.save_submitted(job)
         self.tasks[job_id] = asyncio.create_task(self._run(job_id))
         return job
@@ -69,12 +62,10 @@ class JobService:
         try:
             async with self.semaphore:
                 worker = self.registry.get(job.worker)
-                proxy = self.proxies.get(job_id)
-                proxy_url = proxy.server if proxy else None
-                if job.worker in {"google_transparency", "meta_library", "tiktok_ads_library"}:
-                    result = await collect_countries(worker, job.payload, proxy_url, self.settings.job_timeout_seconds)
+                if job.worker in {"google_transparency", "meta_library"}:
+                    result = await collect_countries(worker, job.payload, self.settings.job_timeout_seconds)
                 else:
-                    result = await asyncio.wait_for(worker.run(job.payload, proxy_url), self.settings.job_timeout_seconds)
+                    result = await asyncio.wait_for(worker.run(job.payload), self.settings.job_timeout_seconds)
             self._apply_result(job, result)
         except asyncio.TimeoutError:
             self._apply_result(job, WorkerResult(status=JobStatus.TIMEOUT, errorCode="JOB_TIMEOUT", errorMessage="worker exceeded timeout"))
@@ -125,8 +116,6 @@ class JobService:
             collectedAt=job.finishedAt or utc_now(),
             windowStart=job.windowStart,
             windowEnd=job.windowEnd,
-            proxyProfile=job.proxyProfile,
-            proxyRequired=job.proxyRequired,
             fetchedCount=job.fetchedCount,
             newCount=job.newCount,
             updatedCount=job.updatedCount,
@@ -155,8 +144,6 @@ def _media_for_worker(worker: str) -> str:
     """把 Worker 名称映射为稳定的平台来源值。"""
     if worker.startswith("google"):
         return "GOOGLE_TRANSPARENCY_WEB"
-    if worker.startswith("tiktok"):
-        return "TIKTOK_AD_LIBRARY_WEB"
     return "META_LIBRARY_WEB"
 
 

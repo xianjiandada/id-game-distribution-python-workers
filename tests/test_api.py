@@ -18,7 +18,7 @@ class MockWorker(BaseWorker):
 
     name = "mock"
 
-    async def run(self, payload: dict, proxy_url: str | None = None) -> WorkerResult:
+    async def run(self, payload: dict) -> WorkerResult:
         """按请求参数模拟耗时、失败或返回素材列表。"""
         # Mock Worker 用于本地验证异步执行和回调链路。
         await asyncio.sleep(float(payload.get("sleepSeconds", 0)))
@@ -49,7 +49,7 @@ class ImmediateManualWorker(BaseWorker):
 
     name = "google_transparency"
 
-    async def run(self, payload: dict, proxy_url: str | None = None) -> WorkerResult:
+    async def run(self, payload: dict) -> WorkerResult:
         """立即返回人工介入状态，避免测试访问真实 Google 页面。"""
         return WorkerResult(status=JobStatus.WAITING_MANUAL, errorCode="TEST_MANUAL")
 
@@ -128,16 +128,3 @@ async def test_unknown_worker_is_rejected():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/jobs", json={"worker": "unknown"})
     assert response.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_required_proxy_without_server_configuration_is_rejected():
-    """验证强制代理但未配置时返回 503。"""
-    app = create_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/jobs",
-            json={"worker": "google_transparency", "runID": 3, "proxyProfile": "google_hk", "proxyRequired": True},
-        )
-    assert response.status_code == 503
-    assert "proxy profile is not configured" in response.json()["detail"]

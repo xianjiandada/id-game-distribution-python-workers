@@ -44,10 +44,6 @@ class JobStore:
                     status TEXT NOT NULL,
                     -- Worker 原始请求参数 JSON。
                     payloadJson TEXT NOT NULL,
-                    -- 逻辑代理 Profile，不保存代理地址和认证信息。
-                    proxyProfile TEXT,
-                    -- 是否强制使用代理。
-                    proxyRequired INTEGER NOT NULL DEFAULT 0,
                     -- 抓取素材总数。
                     fetchedCount INTEGER NOT NULL DEFAULT 0,
                     -- 新素材数量。
@@ -94,8 +90,6 @@ class JobStore:
             )
             columns = {row[1] for row in connection.execute("PRAGMA table_info(worker_job)")}
             for name, definition in (
-                ("proxyProfile", "TEXT"),
-                ("proxyRequired", "INTEGER NOT NULL DEFAULT 0"),
                 ("restrictionType", "TEXT"),
                 ("restrictionEvidence", "TEXT"),
             ):
@@ -108,8 +102,8 @@ class JobStore:
                 """
                 INSERT OR REPLACE INTO worker_job
                 (jobID, runID, queryID, keyword, worker, status, payloadJson,
-                 proxyProfile, proxyRequired, acceptedAt)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 acceptedAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.jobID,
@@ -119,8 +113,6 @@ class JobStore:
                     job.worker,
                     job.status.value,
                     json.dumps(job.payload, ensure_ascii=False),
-                    job.proxyProfile,
-                    int(job.proxyRequired),
                     job.acceptedAt.isoformat(),
                 ),
             )

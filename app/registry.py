@@ -9,7 +9,7 @@ class Worker(Protocol):
 
     name: str
 
-    async def run(self, payload: dict, proxy_url: str | None = None) -> WorkerResult:
+    async def run(self, payload: dict) -> WorkerResult:
         """执行平台任务并返回统一结果。"""
         ...
 

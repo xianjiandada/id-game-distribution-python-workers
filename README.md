@@ -5,7 +5,7 @@
 ## 当前能力
 
 - FastAPI 内部任务 API：提交任务后立即返回 `jobID`。
-- Worker 注册和路由：`meta_library`、`google_transparency`、`tiktok_ads_library`。
+- Worker 注册和路由：`meta_library`、`google_transparency`。
 - 异步执行、任务状态查询、失败回调和运行结果回调。
 - Meta Ads Library 公开网页抓取和 Google Ads Transparency 网页搜索抓取。
 - Java Manager 回调契约，以及 Ubuntu + 宝塔面板的原生进程部署方案。
@@ -59,7 +59,7 @@ Invoke-RestMethod http://127.0.0.1:13371/health
 Invoke-RestMethod http://127.0.0.1:13371/workers
 ```
 
-健康检查应返回 `status: UP`，Worker 列表应包含 `meta_library` 和 `google_transparency`。接口调试页：<http://127.0.0.1:13371/docs>。`/health` 只说明 API 存活，不代表 Chromium、代理或 Java 回调已经验证。
+健康检查应返回 `status: UP`，Worker 列表应包含 `meta_library` 和 `google_transparency`。接口调试页：<http://127.0.0.1:13371/docs>。`/health` 只说明 API 存活，不代表 Chromium 或 Java 回调已经验证。
 
 **单独启动 Python 服务不需要先启动 Java、MySQL 或 Redis**，本服务使用 SQLite。Java 联调复用 Java 项目现有测试数据库和依赖，不另建 MySQL / Redis，也不使用旧 `docker-compose.local.yml` 覆盖 Java 配置。完整 CMS 验收还需要 Quartz，步骤见[本地联调与验收](docs/本地验收.md)。默认 Manager 回调地址为 `http://127.0.0.1:13367/admin/creative/runs`，任务指定的 `callbackUrl` 优先。下方 Mock 不传 `runID` / `callbackUrl`，仅验证 Python。
 
@@ -82,7 +82,7 @@ Invoke-RestMethod http://127.0.0.1:13371/workers
 
 任务完成后，Python 将运行审计和最新素材写入 `DATABASE_PATH`（默认 `data/worker.db`），相同 `media + externalAdID` 只保留一条，素材上的查询上下文随最新结果更新。正常 Java 链路由 Quartz 先创建 `advert_creative_run`，Manager 收到回调后更新运行状态、upsert 素材；Python 抓取成功不代表 Java 入库成功。
 
-任务参数 `payload.maxResults` 为结果条数上限；`0`、空值或不传表示不设条数上限，但仍受滚动轮次、连续 5 轮卡片数量不增长及任务超时限制。验证挑战可能返回 `WAITING_MANUAL`，无结果或其他异常也可能返回 `FAILED`。回调会附带 `restrictionType` 和 `restrictionEvidence`，便于按限制类型配置代理重试。
+任务参数 `payload.maxResults` 为结果条数上限；`0`、空值或不传表示不设条数上限，但仍受滚动轮次、连续 5 轮卡片数量不增长及任务超时限制。验证挑战可能返回 `WAITING_MANUAL`，无结果或其他异常也可能返回 `FAILED`。回调会附带 `restrictionType` 和 `restrictionEvidence`，便于按限制类型排查。
 
 ## 两个平台快速烟测
 
@@ -104,18 +104,17 @@ python scripts/live_smoke_test.py --meta-keyword "手机壳" --google-advertiser
 python scripts/live_smoke_test.py --max-results 0
 ```
 
-烟测脚本默认使用 Meta `country=ALL`、Google `region=SG`；普通 API 任务的 Google 地区缺省为 `ANYWHERE`。脚本不自动读取 `.env`，也不写 SQLite 或回调 Java。需要代理时，在当前终端设置环境变量，再传逻辑 Profile 名称；若配置了自定义 `PLAYWRIGHT_BROWSERS_PATH`，也需在该终端设置：
+烟测脚本默认使用 Meta `country=ALL`、Google `region=SG`；普通 API 任务的 Google 地区缺省为 `ANYWHERE`。脚本不自动读取 `.env`，也不写 SQLite 或回调 Java。若配置了自定义 `PLAYWRIGHT_BROWSERS_PATH`，需在该终端设置：
 
 ```powershell
-$env:PROXY_PROFILE_GOOGLE_HK = 'socks5://user:password@proxy.example:1080'
-python scripts/live_smoke_test.py --max-results 3 --proxy-profile google_hk
+python scripts/live_smoke_test.py --max-results 3
 ```
 
 ## 线上运行（Ubuntu + 宝塔）
 
-**不需要编译打包，直接上传源码即可；压缩成 ZIP 上传解压也可以。** 必需文件是 `app/`、`requirements.txt` 和项目根目录的 `production.env`。当前仓库提供的 `production.env` 不含真实密码或代理凭据，可以随代码上传；不要上传本地 `.venv`、`.idea`、缓存或 `data/`。服务器仍需单独安装依赖和 Chromium。
+**不需要编译打包，直接上传源码即可；压缩成 ZIP 上传解压也可以。** 必需文件是 `app/`、`requirements.txt` 和项目根目录的 `production.env`。当前仓库提供的 `production.env` 不含真实密码，可以随代码上传；不要上传本地 `.venv`、`.idea`、缓存或 `data/`。服务器仍需单独安装依赖和 Chromium。
 
-首次发布，直接上传项目根目录的 `production.env`，核对回调地址和共享目录后使用生产命令；后续发布更新代码时一并上传该文件即可。若在其中填写真实密码或代理凭据，应改为服务器单独管理并从 Git 提交中移除。本地启动仍读取 `.env`：
+首次发布，直接上传项目根目录的 `production.env`，核对回调地址和共享目录后使用生产命令；后续发布更新代码时一并上传该文件即可。若在其中填写真实密码，应改为服务器单独管理并从 Git 提交中移除。本地启动仍读取 `.env`：
 
 ```text
 本地：python -m app

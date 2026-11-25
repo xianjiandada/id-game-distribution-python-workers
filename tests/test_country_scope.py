@@ -49,7 +49,7 @@ async def test_multicountry_merges_hits_and_keeps_partial_results():
         WorkerResult(items=[{"externalAdID": "us"}, {"externalAdID": "shared"}]),
         WorkerResult(status=JobStatus.WAITING_MANUAL, errorMessage="region unavailable"),
     ]
-    result = await collect_countries(worker, {"countryCodes": ["JP", "US", "DE", "JP"], "maxResults": 2}, None, 5)
+    result = await collect_countries(worker, {"countryCodes": ["JP", "US", "DE", "JP"], "maxResults": 2}, 5)
     assert [call.args[0]["countryCodes"] for call in worker.run.await_args_list] == [["JP"], ["US"], ["DE"]]
     assert result.status == JobStatus.PARTIAL_SUCCESS and "DE" in result.errorMessage
     assert [(i["externalAdID"], i["regions"]) for i in result.items] == [("shared", ["JP", "US"]), ("us", ["US"])]
@@ -59,6 +59,6 @@ async def test_multicountry_merges_hits_and_keeps_partial_results():
 async def test_worldwide_retains_only_disclosed_regions():
     worker = AsyncMock()
     worker.run.return_value = WorkerResult(items=[{"externalAdID": "one"}, {"externalAdID": "two", "regions": ["JP"]}])
-    result = await collect_countries(worker, {"countryCodes": ["ALL"]}, None, 5)
+    result = await collect_countries(worker, {"countryCodes": ["ALL"]}, 5)
     assert [i["regions"] for i in result.items] == [[], ["JP"]]
     assert all(i["requestRegions"] == [] for i in result.items)

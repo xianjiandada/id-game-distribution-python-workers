@@ -10,6 +10,6 @@ class BaseWorker(ABC):
     name: str
 
     @abstractmethod
-    async def run(self, payload: dict, proxy_url: str | None = None) -> WorkerResult:
+    async def run(self, payload: dict) -> WorkerResult:
         """执行一次任务并返回宿主可识别的标准结果。"""
         raise NotImplementedError

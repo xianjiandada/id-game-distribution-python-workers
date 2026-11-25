@@ -5,7 +5,9 @@ from urllib.parse import urlencode, urljoin
 
 from playwright.async_api import Error as PlaywrightError, async_playwright
 
+from ...creative_fields import infer_function, infer_language
 from ...models import JobStatus, WorkerResult
+from ...youtube_meta import enrich as enrich_youtube_metadata
 from ..base import BaseWorker
 
 
@@ -14,7 +16,7 @@ class GoogleTransparencyWorker(BaseWorker):
 
     name = "google_transparency"
 
-    async def run(self, payload: dict, proxy_url: str | None = None) -> WorkerResult:
+    async def run(self, payload: dict) -> WorkerResult:
         """通过 Google Ads Transparency 公开网页搜索广告主，不调用 Google Ads API。"""
         keyword = str(payload.get("advertiserName") or payload.get("keyword") or "").strip()
         if not keyword:
@@ -26,9 +28,8 @@ class GoogleTransparencyWorker(BaseWorker):
 
         # Google 未填写国家/地区时使用 ANYWHERE；宿主按地区分别调用。
         region = GoogleTransparencyWorker._resolve_region(payload)
-        proxy = {"server": proxy_url} if proxy_url else None
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True, proxy=proxy)
+            browser = await playwright.chromium.launch(headless=True)
             context = await browser.new_context(locale="zh-CN")
             page = await context.new_page()
             try:
@@ -213,6 +214,7 @@ class GoogleTransparencyWorker(BaseWorker):
                         "productName": None,
                         "packageName": None,
                         "copyText": None,
+                        "youtubeVideoId": None,
                     }
                 is_video = (
                     preview["mediaType"] == "VIDEO"
@@ -231,6 +233,7 @@ class GoogleTransparencyWorker(BaseWorker):
                     # 预览文案中通常包含竞品产品名；包名只有页面明确返回时才填入，不能臆造。
                     "detectedProductName": preview["productName"],
                     "detectedPackageName": preview["packageName"],
+                    "youtubeVideoId": preview["youtubeVideoId"],
                 }
                 item = {
                     "media": "GOOGLE_TRANSPARENCY_WEB",
@@ -252,12 +255,24 @@ class GoogleTransparencyWorker(BaseWorker):
                     "sourceUrl": page.url,
                     "previewScriptUrl": record["src"],
                     "mediaUrl": media_url,
+                    "youtubeVideoId": preview["youtubeVideoId"],
+                    "creativeFunction": GoogleTransparencyWorker._infer_function(
+                        " ".join(filter(None, [preview["previewText"], preview["productName"], preview["copyText"], record["label"]]))
+                    ),
+                    "language": GoogleTransparencyWorker._infer_language(
+                        " ".join(filter(None, [preview["previewText"], preview["productName"], preview["copyText"], record["label"]]))
+                    ),
                     "platformData": platform_data,
                 }
                 result.append(item)
-                if max_results is not None and len(result) >= max_results:
-                    return result[:max_results]
-        return result if max_results is None else result[:max_results]
+        selected = result if max_results is None else result[:max_results]
+        selected = await enrich_youtube_metadata(selected)
+        for item in selected:
+            if not item.get("creativeFunction"):
+                item["creativeFunction"] = GoogleTransparencyWorker._infer_function(
+                    " ".join(filter(None, [item.get("title"), item.get("copyText"), item.get("youtubeTitle")]))
+                )
+        return selected
 
     @staticmethod
     def _parse_max_results(value: object) -> int | None:
@@ -311,7 +326,7 @@ class GoogleTransparencyWorker(BaseWorker):
 
     @staticmethod
     def _is_http_url(value: str | None) -> bool:
-        """只把 Java 媒体代理可以直接请求的 HTTP(S) 地址写入 mediaUrl。"""
+        """只把 Java 媒体归档可以直接请求的 HTTP(S) 地址写入 mediaUrl。"""
         return bool(value and re.match(r"^https?://", value, re.I))
 
     @staticmethod
@@ -340,6 +355,7 @@ class GoogleTransparencyWorker(BaseWorker):
             "productName": None,
             "packageName": None,
             "copyText": None,
+            "youtubeVideoId": None,
         }
         script_preview = await GoogleTransparencyWorker._extract_script_preview(
             page, preview_script_url, script_timeout_ms
@@ -374,16 +390,19 @@ class GoogleTransparencyWorker(BaseWorker):
                 if await videos.count():
                     video_url = await videos.first.get_attribute("src")
                     result["mediaType"] = "VIDEO"
+                    result["youtubeVideoId"] = result["youtubeVideoId"] or GoogleTransparencyWorker._extract_youtube_video_id(video_url)
                     if not video_url:
                         video_url = await videos.first.get_attribute("poster")
                 if not video_url and await sources.count():
                     video_url = await sources.first.get_attribute("src")
                     if video_url:
                         result["mediaType"] = "VIDEO"
+                        result["youtubeVideoId"] = result["youtubeVideoId"] or GoogleTransparencyWorker._extract_youtube_video_id(video_url)
                 if await images.count():
                     image_url = await images.first.get_attribute("src")
                     if image_url:
                         result["previewImageUrl"] = image_url
+                        result["youtubeVideoId"] = result["youtubeVideoId"] or GoogleTransparencyWorker._extract_youtube_video_id(image_url)
                         if not video_url and result["mediaType"] is None:
                             result["mediaType"] = "IMAGE"
                 if video_url and (not result["mediaUrl"] or script_media_type != "VIDEO"):
@@ -400,7 +419,7 @@ class GoogleTransparencyWorker(BaseWorker):
         page, preview_script_url: str | None, timeout_ms: int
     ) -> dict[str, str | None]:
         """从 Google 预览脚本内的 VAST 片段提取带签名的视频和缩略图地址。"""
-        result = {"mediaUrl": None, "previewImageUrl": None, "mediaType": None}
+        result = {"mediaUrl": None, "previewImageUrl": None, "mediaType": None, "youtubeVideoId": None}
         if not preview_script_url:
             return result
         try:
@@ -413,6 +432,7 @@ class GoogleTransparencyWorker(BaseWorker):
                 return result
             source = await response.text()
             source = GoogleTransparencyWorker._decode_preview_script(source)
+            result["youtubeVideoId"] = GoogleTransparencyWorker._extract_youtube_video_id(source)
             video_match = re.search(
                 r"//[^\"'\s<>]+googlevideo\.com/videoplayback\?[^\"'\s<>]+",
                 source,
@@ -439,6 +459,27 @@ class GoogleTransparencyWorker(BaseWorker):
             # 预览签名过期或脚本请求被拦截时，仍保留 iframe 解析结果。
             return result
         return result
+
+    @staticmethod
+    def _extract_youtube_video_id(value: str | None) -> str | None:
+        """从 YouTube、缩略图或嵌入地址中提取标准 11 位视频 ID。"""
+        text = str(value or "")
+        match = re.search(
+            r"(?:youtube(?:-nocookie)?\.com/(?:watch\?[^\s\"'<>]*?v=|embed/|shorts/)|youtu\.be/|ytimg\.com/(?:vi|vi_webp)/)([A-Za-z0-9_-]{11})",
+            text,
+            re.IGNORECASE,
+        )
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _infer_language(text: str | None) -> str | None:
+        """仅在文案中存在明确语言信号时返回语言代码。"""
+        return infer_language(text)
+
+    @staticmethod
+    def _infer_function(text: str | None) -> str | None:
+        """按明确的广告文案关键词归类素材用途，无法区分时留空。"""
+        return infer_function(text)
 
     @staticmethod
     def _decode_preview_script(source: str) -> str:

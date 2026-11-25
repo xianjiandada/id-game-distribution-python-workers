@@ -6,11 +6,9 @@ from .callback import JavaCallbackClient
 from .config import settings
 from .models import JobSubmitRequest, JobSubmitResponse
 from .registry import WorkerRegistry
-from .proxy import ProxyUnavailable
 from .service import JobService
 from .workers.google_transparency.worker import GoogleTransparencyWorker
 from .workers.meta_library.worker import MetaLibraryWorker
-from .workers.tiktok_ads_library.worker import TikTokAdsLibraryWorker
 
 
 def create_app() -> FastAPI:
@@ -19,7 +17,6 @@ def create_app() -> FastAPI:
     registry = WorkerRegistry()
     registry.register(MetaLibraryWorker())
     registry.register(GoogleTransparencyWorker())
-    registry.register(TikTokAdsLibraryWorker())
     app.state.registry = registry
     app.state.jobs = JobService(registry, JavaCallbackClient(settings), settings)
 
@@ -41,8 +38,6 @@ def create_app() -> FastAPI:
             job = app.state.jobs.submit(request)
         except KeyError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except ProxyUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
         return JobSubmitResponse(jobID=job.jobID, runID=job.runID, worker=job.worker, status=job.status, acceptedAt=job.acceptedAt)
 
     @app.get("/jobs/{jobID}")
