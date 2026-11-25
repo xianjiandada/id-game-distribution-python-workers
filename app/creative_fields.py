@@ -14,20 +14,33 @@ def infer_language(text: str | None) -> str | None:
     if explicit:
         return explicit.group(1).lower()
     named = re.search(
-        r"\b(english|japanese|korean|spanish|portuguese|french|german|russian)\b",
+        r"(?:^|[^a-z])(english|japanese|korean|spanish|portuguese|french|german|russian|"
+        r"英语|英文|西班牙语|西语|葡萄牙语|日语|韩语|法语|德语|俄语|中文|汉语)(?:$|[^a-z])",
         value,
         re.IGNORECASE,
     )
     if named:
         return {
             "english": "en",
+            "英语": "en",
+            "英文": "en",
             "japanese": "ja",
+            "日语": "ja",
             "korean": "ko",
+            "韩语": "ko",
             "spanish": "es",
+            "西班牙语": "es",
+            "西语": "es",
             "portuguese": "pt",
+            "葡萄牙语": "pt",
             "french": "fr",
+            "法语": "fr",
             "german": "de",
+            "德语": "de",
             "russian": "ru",
+            "俄语": "ru",
+            "中文": "zh",
+            "汉语": "zh",
         }[named.group(1).lower()]
     if re.search(r"[\u3040-\u30ff]", value):
         return "ja"
@@ -39,7 +52,28 @@ def infer_language(text: str | None) -> str | None:
         return "ru"
     if re.search(r"[\u0600-\u06ff]", value):
         return "ar"
-    # 拉丁字母可能只是品牌名、产品名或按钮文案，无法据此确认英语。
+    if re.search(r"[áéíóúñ¿¡]", value, re.IGNORECASE):
+        return "es"
+    if re.search(r"[ãõçà]", value, re.IGNORECASE):
+        return "pt"
+    if re.search(
+        r"\b(archivos|fotos|datos|eliminados|eliminadas|recuperar|restaurar|"
+        r"limpiar|limpieza|espacio|almacenamiento|basura)\b",
+        value,
+        re.IGNORECASE,
+    ):
+        return "es"
+    if re.search(
+        r"\b(arquivos|limpeza|espaço|espaco|celular|memória|memoria|"
+        r"liberar|limpador|recuperar|restaurar)\b",
+        value,
+        re.IGNORECASE,
+    ):
+        return "pt"
+    # 参考 ATC 项目仅对成句文案兜底英文，避免把产品名或控件误判为英语。
+    if (len(re.findall(r"[A-Za-z]{3,}", value)) >= 2
+            and not re.search(r"\b(install|sponsored|learn more|downloads)\b", value, re.IGNORECASE)):
+        return "en"
     return None
 
 

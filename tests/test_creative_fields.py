@@ -35,6 +35,12 @@ def test_google_page_labels_do_not_determine_language() -> None:
     assert GoogleTransparencyWorker._infer_language("SoEasy Tile Install Install") is None
 
 
+def test_language_fallback_matches_atc_sentence_rules() -> None:
+    assert GoogleTransparencyWorker._infer_language("Recover deleted files now") == "en"
+    assert GoogleTransparencyWorker._infer_language("Recuperar fotos eliminadas") == "es"
+    assert GoogleTransparencyWorker._infer_language("Limpeza de arquivos apagados") == "pt"
+
+
 def test_google_infers_function_from_ad_copy() -> None:
     assert GoogleTransparencyWorker._infer_function("Recover deleted photos") == "文件恢复"
     assert GoogleTransparencyWorker._infer_function("Phone cleaner and junk remover") == "清理"
