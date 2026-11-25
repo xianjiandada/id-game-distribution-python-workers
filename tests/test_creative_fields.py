@@ -30,6 +30,11 @@ def test_google_extracts_youtube_video_id_and_language() -> None:
     assert GoogleTransparencyWorker._infer_language("日本語の広告") == "ja"
 
 
+def test_google_page_labels_do_not_determine_language() -> None:
+    """Google 当前界面的中文卡片标签不应被当成素材语言。"""
+    assert GoogleTransparencyWorker._infer_language("SoEasy Tile Install Install") is None
+
+
 def test_google_infers_function_from_ad_copy() -> None:
     assert GoogleTransparencyWorker._infer_function("Recover deleted photos") == "文件恢复"
     assert GoogleTransparencyWorker._infer_function("Phone cleaner and junk remover") == "清理"

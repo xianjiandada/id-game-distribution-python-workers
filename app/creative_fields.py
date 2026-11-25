@@ -39,8 +39,7 @@ def infer_language(text: str | None) -> str | None:
         return "ru"
     if re.search(r"[\u0600-\u06ff]", value):
         return "ar"
-    if len(re.findall(r"[A-Za-z]{3,}", value)) >= 2:
-        return "en"
+    # 拉丁字母可能只是品牌名、产品名或按钮文案，无法据此确认英语。
     return None
 
 

@@ -259,8 +259,9 @@ class GoogleTransparencyWorker(BaseWorker):
                     "creativeFunction": GoogleTransparencyWorker._infer_function(
                         " ".join(filter(None, [preview["previewText"], preview["productName"], preview["copyText"], record["label"]]))
                     ),
+                    # 页面卡片标签可能是当前界面的中文控件文案，不能作为素材语言依据。
                     "language": GoogleTransparencyWorker._infer_language(
-                        " ".join(filter(None, [preview["previewText"], preview["productName"], preview["copyText"], record["label"]]))
+                        " ".join(filter(None, [preview["previewText"], preview["productName"], preview["copyText"]]))
                     ),
                     "platformData": platform_data,
                 }
