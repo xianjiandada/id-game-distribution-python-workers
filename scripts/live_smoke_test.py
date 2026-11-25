@@ -90,13 +90,13 @@ async def _main(
             "google_transparency",
             GoogleTransparencyWorker(),
             {
-                "advertiserName": google_advertiser,
+                "keyword": google_advertiser,
                 "region": google_region,
                 "maxResults": None if max_results == 0 else max_results,
                 "suggestionWaitMs": wait_ms,
                 "resultWaitMs": wait_ms,
             },
-            {"advertiserName": google_advertiser, "region": google_region},
+            {"keyword": google_advertiser, "region": google_region},
         ),
     ]
     results: list[dict[str, Any]] = []

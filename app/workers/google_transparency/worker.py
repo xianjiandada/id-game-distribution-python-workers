@@ -18,12 +18,12 @@ class GoogleTransparencyWorker(BaseWorker):
 
     async def run(self, payload: dict) -> WorkerResult:
         """通过 Google Ads Transparency 公开网页搜索广告主，不调用 Google Ads API。"""
-        keyword = str(payload.get("advertiserName") or payload.get("keyword") or "").strip()
+        keyword = str(payload.get("keyword") or "").strip()
         if not keyword:
             return WorkerResult(
                 status=JobStatus.FAILED,
                 errorCode="GOOGLE_ADVERTISER_REQUIRED",
-                errorMessage="必须提供 advertiserName 或 keyword",
+                errorMessage="必须提供 keyword",
             )
 
         # Google 未填写国家/地区时使用 ANYWHERE；宿主按地区分别调用。

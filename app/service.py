@@ -38,7 +38,7 @@ class JobService:
             status=JobStatus.DISPATCHED,
             payload=request.payload,
             queryID=request.payload.get("queryID"),
-            keyword=request.payload.get("keyword") or request.payload.get("advertiserName"),
+            keyword=request.payload.get("keyword"),
             media=_media_for_worker(request.worker),
             windowStart=request.payload.get("windowStart"),
             windowEnd=request.payload.get("windowEnd"),
