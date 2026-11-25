@@ -8,8 +8,11 @@ import re
 import sqlite3
 import subprocess
 import sys
+from urllib.parse import quote
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from .config import settings
 
@@ -74,8 +77,38 @@ def _store(video_id: str, metadata: dict[str, Any], database_path: str) -> None:
         )
 
 
+def _fetch_oembed(video_id: str) -> dict[str, Any] | None:
+    """通过 YouTube oEmbed 获取公开标题，避免依赖页面脚本和 yt-dlp。"""
+    url = "https://www.youtube.com/oembed?format=json&url=" + quote(
+        f"https://www.youtube.com/watch?v={video_id}", safe=""
+    )
+    try:
+        response = httpx.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20,
+            follow_redirects=True,
+        )
+        if response.status_code != 200:
+            return None
+        payload = response.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        return None
+    return {
+        "title": title,
+        "author_name": str(payload.get("author_name") or "").strip(),
+    }
+
+
 def _fetch_sync(video_id: str) -> dict[str, Any] | None:
-    """调用 yt-dlp 获取单条视频元数据，失败时返回空值。"""
+    """优先用 oEmbed 取标题，失败时再尝试 yt-dlp。"""
+    oembed = _fetch_oembed(video_id)
+    if oembed:
+        # oEmbed 的标题足够用于页面展示和语言判断，其他数值字段继续由 yt-dlp 补充。
+        return {**oembed, "duration_seconds": 0, "view_count": 0, "language": ""}
     command = [
         sys.executable,
         "-m",

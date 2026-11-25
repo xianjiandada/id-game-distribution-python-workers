@@ -306,6 +306,10 @@ class GoogleTransparencyWorker(BaseWorker):
                     item["creativeFunction"] = self._infer_function(" ".join(filter(None, [
                         item.get("title"), item.get("copyText"), item.get("youtubeTitle")
                     ])))
+                if not item.get("language"):
+                    item["language"] = self._infer_language(" ".join(filter(None, [
+                        item.get("title"), item.get("copyText"), item.get("youtubeTitle")
+                    ])))
             if not items:
                 return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_CREATIVES_UNREADABLE", errorMessage=f"ATC 未解析到广告主素材：{advertiser_id}")
             return WorkerResult(fetchedCount=len(items), newCount=len(items), items=items)
@@ -481,6 +485,10 @@ class GoogleTransparencyWorker(BaseWorker):
         for item in selected:
             if not item.get("creativeFunction"):
                 item["creativeFunction"] = GoogleTransparencyWorker._infer_function(
+                    " ".join(filter(None, [item.get("title"), item.get("copyText"), item.get("youtubeTitle")]))
+                )
+            if not item.get("language"):
+                item["language"] = GoogleTransparencyWorker._infer_language(
                     " ".join(filter(None, [item.get("title"), item.get("copyText"), item.get("youtubeTitle")]))
                 )
         return selected

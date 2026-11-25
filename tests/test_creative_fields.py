@@ -41,6 +41,11 @@ def test_language_fallback_matches_atc_sentence_rules() -> None:
     assert GoogleTransparencyWorker._infer_language("Limpeza de arquivos apagados") == "pt"
 
 
+def test_language_uses_youtube_title_after_metadata_enrichment() -> None:
+    item = {"youtubeTitle": "Minecraft Villagers SPLIT The Village in HALF"}
+    assert GoogleTransparencyWorker._infer_language(item["youtubeTitle"]) == "en"
+
+
 def test_google_infers_function_from_ad_copy() -> None:
     assert GoogleTransparencyWorker._infer_function("Recover deleted photos") == "文件恢复"
     assert GoogleTransparencyWorker._infer_function("Phone cleaner and junk remover") == "清理"
