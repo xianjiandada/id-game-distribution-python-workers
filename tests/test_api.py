@@ -105,6 +105,33 @@ async def test_query_context_is_kept_in_callback_and_items():
 
 
 @pytest.mark.asyncio
+async def test_configured_creative_function_overrides_worker_value():
+    """查询配置中的素材分类应覆盖 Worker 自动推断值并随回调返回。"""
+    app = create_app()
+    app.state.registry.register(MockWorker())
+    callback = RecordingCallback()
+    app.state.jobs.callback = callback
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/jobs",
+            json={
+                "worker": "mock",
+                "runID": 101,
+                "payload": {
+                    "creativeFunction": "文件恢复",
+                    "items": [{"externalAdID": "category-1", "creativeFunction": "清理"}],
+                },
+            },
+        )
+        assert response.status_code == 202
+        for _ in range(20):
+            if callback.payloads:
+                break
+            await asyncio.sleep(0.01)
+    assert callback.payloads[0].items[0]["creativeFunction"] == "文件恢复"
+
+
+@pytest.mark.asyncio
 async def test_failure_and_waiting_manual_are_explicit():
     """验证失败和人工介入状态不会被吞掉。"""
     app = create_app()
