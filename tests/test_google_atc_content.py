@@ -1,10 +1,45 @@
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 
 from app.models import JobStatus
 from app.workers.google_transparency.worker import GoogleTransparencyWorker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,expected_code", [(200, "GOOGLE_SEARCH_INPUT_UNAVAILABLE"), (429, "GOOGLE_RATE_LIMITED")])
+async def test_company_search_can_open_during_preview_cooldown(monkeypatch, status, expected_code):
+    from app.workers.google_transparency import worker as module
+
+    search_host = "adstransparency.google.com"
+    cooldowns = {"displayads-formats.googleusercontent.com": module.time.monotonic() + 600}
+    monkeypatch.setattr(module, "_cooldowns", cooldowns)
+    monkeypatch.setattr(module, "_consecutive_limits", {})
+    response = SimpleNamespace(url=f"https://{search_host}/", status=status, ok=status == 200,
+                               headers={"retry-after": "120"})
+    page = MagicMock()
+    page.goto = AsyncMock(return_value=response)
+    page.wait_for_timeout = AsyncMock()
+    page.locator.return_value.count = AsyncMock(return_value=0)
+    browser = AsyncMock()
+    browser.new_context.return_value.new_page.return_value = page
+    manager = MagicMock()
+    manager.__aenter__.return_value.chromium.launch = AsyncMock(return_value=browser)
+    monkeypatch.setattr(module, "async_playwright", lambda: manager)
+
+    worker = GoogleTransparencyWorker()
+    payload = {"keyword": "Test company"}
+    result = await worker.run(payload)
+    assert result.errorCode == expected_code
+    page.goto.assert_awaited_once()
+    if status == 429:
+        assert cooldowns[search_host] > module.time.monotonic() + 115
+        assert (await worker.run(payload)).errorCode == expected_code
+        page.goto.assert_awaited_once()
+    else:
+        assert search_host not in cooldowns
 
 
 @pytest.mark.asyncio
@@ -126,3 +161,77 @@ async def test_detail_rate_limit_preserves_already_extracted_copy(monkeypatch):
     result = await worker.run({"keyword": "AR09354817122947039233"})
     assert result.status == JobStatus.PARTIAL_SUCCESS and result.restrictionType == "RATE_LIMITED"
     assert result.items[0]["copyText"] == "Recover files"
+
+
+@pytest.mark.parametrize("markup,expected", [
+    ("<VAST><AdTitle>Recover photos</AdTitle><Description><![CDATA[Restore <b>lost</b> photos]]>"
+     "</Description></VAST>", "Recover photos\nRestore lost photos"),
+    (r'<div data-asoch-targets=\"ochHeadline\">Save <span>files</span></div>'
+     '<span data-asoch-targets="ochTitle">Save files</span>'
+     '<div data-asoch-targets="ochDescription">Fast<br>recovery</div>', "Save files\nFast recovery"),
+    ('<div data-asoch-targets="other">Tracking</div><Impression>https://pixel.test</Impression>'
+     '<script><Description>internal</Description></script>'
+     '<Description>https://pixel.test</Description>', None),
+])
+def test_explicit_preview_copy(markup, expected):
+    assert GoogleTransparencyWorker._parse_atc_preview(markup)["copyText"] == expected
+
+
+@pytest.mark.asyncio
+async def test_rpc_summary_counts_requests_and_outcomes(monkeypatch, caplog):
+    from app.workers.google_transparency import worker as module
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def slot(host):
+        module._check_cooldown(host)
+        yield
+
+    worker = GoogleTransparencyWorker()
+    rows = [{"2": str(i), "3": {"1": {"4": f"https://preview.test/{i}"}}} for i in range(7)]
+    rows[1]["7"] = {"1": "1000"}
+    monkeypatch.setattr(module, "_cooldowns", {})
+    monkeypatch.setattr(module, "_consecutive_limits", {})
+    monkeypatch.setattr(module, "_preview_slot", slot)
+    monkeypatch.setattr(worker, "_atc_rpc", AsyncMock(return_value={"1": rows}))
+    monkeypatch.setattr(worker, "_atc_detail", AsyncMock(return_value={}))
+    get = AsyncMock(side_effect=[
+        httpx.Response(404), httpx.Response(200, text="opaque"), httpx.Response(200, text="<AdTitle>Keep me</AdTitle>"),
+        httpx.Response(429),
+    ])
+    monkeypatch.setattr(httpx.AsyncClient, "get", get)
+    payload = {"keyword": "AR09354817122947039233", "knownCreativeIDs": ["0"], "windowStart": "2026-11-25"}
+    with caplog.at_level("INFO", logger="uvicorn.error"):
+        result = await worker.run(payload)
+        await worker.run(payload)
+    assert result.items[0]["format"] == "TEXT"
+    logs = [msg for msg in caplog.messages if "抓取汇总" in msg]
+    assert len(logs) == 2
+    assert "候选=6 窗口外=1 已入库跳过=1 预览请求=4 预览失败=2 预览成功但无内容=1" in logs[0]
+    assert "无内容跳过=2 HTTP429=1 冷却拦截=0 返回=1" in logs[0]
+    assert "预览请求=0" in logs[1] and "HTTP429=0 冷却拦截=1 返回=0" in logs[1]
+
+
+@pytest.mark.asyncio
+async def test_web_preview_counts_are_isolated_per_run(monkeypatch, caplog):
+    import asyncio
+    from app.models import WorkerResult
+
+    worker = GoogleTransparencyWorker()
+    async def search(payload, keyword):
+        response = SimpleNamespace(ok=True, status=200, text=AsyncMock(return_value=payload["markup"]))
+        page = MagicMock()
+        page.context.request.get = AsyncMock(return_value=response)
+        preview = await worker._extract_script_preview(page, f"https://{keyword}.test/ad", 1000)
+        return WorkerResult(items=[preview] if preview.get("copyText") else [])
+
+    monkeypatch.setattr(worker, "_search_web", search)
+    with caplog.at_level("INFO", logger="uvicorn.error"):
+        await asyncio.gather(worker.run({"keyword": "empty", "markup": ""}),
+                             worker.run({"keyword": "full", "markup": '<span data-asoch-targets="ochAppName">App</span>'}))
+    logs = [msg for msg in caplog.messages if "抓取汇总" in msg]
+    assert len(logs) == 2
+    for msg in logs:
+        assert "route=WEB" in msg and "预览请求=1" in msg
+        empty = "keyword=empty" in msg
+        assert f"预览成功但无内容={int(empty)}" in msg and f"返回={int(not empty)}" in msg

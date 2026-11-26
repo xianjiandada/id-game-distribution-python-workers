@@ -27,15 +27,23 @@ def youtube_video_url(video_id: str | None) -> str | None:
 
 
 def _ensure_table(connection: sqlite3.Connection) -> None:
+    connection.execute("BEGIN IMMEDIATE")
     connection.execute(
         """CREATE TABLE IF NOT EXISTS youtube_video_meta (
             video_id TEXT PRIMARY KEY,
             title TEXT,
             view_count INTEGER,
+            views_checked_at TEXT,
+            duration_seconds INTEGER,
             language TEXT,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )"""
     )
+    if "views_checked_at" not in {row[1] for row in connection.execute("PRAGMA table_info(youtube_video_meta)")}:
+        connection.execute("ALTER TABLE youtube_video_meta ADD COLUMN views_checked_at TEXT")
+        connection.execute("UPDATE youtube_video_meta SET view_count=NULL WHERE view_count=0")
+    if "duration_seconds" not in {row[1] for row in connection.execute("PRAGMA table_info(youtube_video_meta)")}:
+        connection.execute("ALTER TABLE youtube_video_meta ADD COLUMN duration_seconds INTEGER")
 
 
 def _lookup(video_ids: list[str], database_path: str) -> dict[str, dict[str, Any]]:
@@ -48,7 +56,8 @@ def _lookup(video_ids: list[str], database_path: str) -> dict[str, dict[str, Any
         _ensure_table(connection)
         placeholders = ",".join("?" for _ in video_ids)
         rows = connection.execute(
-            "SELECT video_id, title, view_count, language "
+            "SELECT video_id, title, view_count, duration_seconds, language, "
+            "views_checked_at > datetime('now', '-1 day') AS fresh "
             f"FROM youtube_video_meta WHERE video_id IN ({placeholders})",
             video_ids,
         ).fetchall()
@@ -62,15 +71,18 @@ def _store(video_id: str, metadata: dict[str, Any], database_path: str) -> None:
         _ensure_table(connection)
         connection.execute(
             "INSERT INTO youtube_video_meta "
-            "(video_id, title, view_count, language) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(video_id) DO UPDATE SET title=excluded.title, "
-            "view_count=excluded.view_count, language=excluded.language, "
+            "(video_id, title, view_count, duration_seconds, language, views_checked_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(video_id) DO UPDATE SET title=COALESCE(excluded.title, title), "
+            "view_count=COALESCE(excluded.view_count, view_count), language=COALESCE(excluded.language, language), "
+            "duration_seconds=COALESCE(excluded.duration_seconds, duration_seconds), "
+            "views_checked_at=CURRENT_TIMESTAMP, "
             "updated_at=CURRENT_TIMESTAMP",
             (
                 video_id,
-                metadata.get("title") or "",
-                int(metadata.get("view_count") or 0),
-                metadata.get("language") or "",
+                metadata.get("title") or None,
+                metadata.get("view_count"),
+                metadata.get("duration_seconds"),
+                metadata.get("language") or None,
             ),
         )
 
@@ -101,12 +113,31 @@ def _fetch_oembed(video_id: str) -> dict[str, Any] | None:
     }
 
 
+def _view_count(value: Any) -> int | None:
+    digits = str(value)
+    return int(digits) if re.fullmatch(r"[0-9]{1,18}", digits) else None
+
+
 def _fetch_sync(video_id: str) -> dict[str, Any] | None:
-    """优先用 oEmbed 取标题，失败时再尝试 yt-dlp。"""
+    """读取原视频播放器公开的累计播放量，保留仅有标题的部分结果。"""
+    try:
+        response = httpx.get(youtube_video_url(video_id), headers={"User-Agent": "Mozilla/5.0"},
+                             timeout=12, follow_redirects=True)
+        if response.status_code == 429:
+            return None
+        if response.is_success:
+            marker = re.search(r"\bytInitialPlayerResponse\s*=\s*", response.text)
+            if marker:
+                player, _ = json.JSONDecoder().raw_decode(response.text, marker.end())
+                details = player.get("videoDetails") if isinstance(player, dict) else None
+                if isinstance(details, dict) and details.get("videoId") == video_id:
+                    return {"title": details.get("title"), "view_count": _view_count(details.get("viewCount")),
+                            "duration_seconds": _view_count(details.get("lengthSeconds")) or None}
+    except (httpx.HTTPError, ValueError):
+        pass
     oembed = _fetch_oembed(video_id)
     if oembed:
-        # oEmbed 的标题足够用于页面展示和语言判断，其他数值字段继续由 yt-dlp 补充。
-        return {**oembed, "view_count": 0, "language": ""}
+        return oembed
     command = [
         sys.executable,
         "-m",
@@ -141,7 +172,8 @@ def _fetch_sync(video_id: str) -> dict[str, Any] | None:
         return None
     return {
         "title": str(payload.get("title") or "").strip(),
-        "view_count": int(payload.get("view_count") or 0),
+        "view_count": _view_count(payload.get("view_count")),
+        "duration_seconds": _view_count(payload.get("duration")) or None,
         "language": str(payload.get("language") or payload.get("original_language") or "").strip(),
     }
 
@@ -153,7 +185,7 @@ async def enrich(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not ids:
         return items
     cached = await asyncio.to_thread(_lookup, ids, settings.database_path)
-    missing = [video_id for video_id in ids if video_id not in cached]
+    missing = [video_id for video_id in ids if not cached.get(video_id, {}).get("fresh")]
     semaphore = asyncio.Semaphore(_FETCH_LIMIT)
 
     async def fetch(video_id: str) -> tuple[str, dict[str, Any] | None]:
@@ -162,9 +194,8 @@ async def enrich(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     fetched = await asyncio.gather(*(fetch(video_id) for video_id in missing))
     for video_id, metadata in fetched:
-        if metadata:
-            cached[video_id] = metadata
-            await asyncio.to_thread(_store, video_id, metadata, settings.database_path)
+        await asyncio.to_thread(_store, video_id, metadata or {}, settings.database_path)
+        cached.setdefault(video_id, {}).update({k: v for k, v in (metadata or {}).items() if v is not None and v != ""})
     for item in items:
         video_id = str(item.get("youtubeVideoId") or "").strip()
         if not _ID_PATTERN.fullmatch(video_id):
@@ -173,7 +204,8 @@ async def enrich(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         metadata = cached.get(video_id)
         if metadata:
             item["youtubeTitle"] = metadata.get("title") or None
-            item["youtubeViewCount"] = int(metadata.get("view_count") or 0)
+            item["youtubeViewCount"] = metadata.get("view_count")
+            item["youtubeDurationSeconds"] = metadata.get("duration_seconds")
             if metadata.get("language"):
                 item["language"] = metadata["language"]
     return items

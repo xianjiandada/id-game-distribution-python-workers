@@ -4,7 +4,9 @@ import json
 import logging
 import re
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
@@ -23,6 +25,13 @@ from .geo import COUNTRY_CODES
 
 
 logger = logging.getLogger("uvicorn.error")
+_run_counts: ContextVar[Counter | None] = ContextVar("google_run_counts", default=None)
+
+
+def _count(name: str):
+    counts = _run_counts.get()
+    if counts is not None:
+        counts[name] += 1
 
 
 class _RateLimited(RuntimeError):
@@ -47,10 +56,12 @@ async def _preview_slot(host: str):
 
 def _check_cooldown(host: str):
     if _cooldowns.get(host, 0) > time.monotonic():
+        _count("cooldown")
         raise _RateLimited(f"{host} HTTP 429，等待冷却")
 
 
 def _cool_down(host: str, retry_after: str | None):
+    _count("http429")
     count = min(5, _consecutive_limits.get(host, 0) + 1)
     _consecutive_limits[host] = count
     seconds = 60 * 2 ** (count - 1)
@@ -64,6 +75,18 @@ def _cool_down(host: str, retry_after: str | None):
                 pass
     _cooldowns[host] = max(_cooldowns.get(host, 0), time.monotonic() + max(1, seconds))
     raise _RateLimited(f"{host} HTTP 429，等待 {max(1, int(seconds))} 秒")
+
+
+async def _open_google_page(page, url: str, timeout: int):
+    _check_cooldown(urlsplit(url).hostname)
+    response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+    if response:
+        host = urlsplit(response.url).hostname
+        if response.status == 429:
+            _cool_down(host, response.headers.get("retry-after"))
+        if response.ok:
+            _consecutive_limits.pop(host, None)
+    return response
 
 
 def _destination(href: str) -> str | None:
@@ -144,6 +167,53 @@ class _InlineAd(HTMLParser):
                 "copyText": "\n".join(self.parts)[:4000] or None, "landingUrl": self.landing}
 
 
+class _MarkedCopy(HTMLParser):
+    """Collect only explicitly labelled OCH and VAST copy inside a preview script."""
+
+    def __init__(self):
+        super().__init__()
+        self.tag = None
+        self.depth = 0
+        self.parts = []
+        self.texts = []
+        self.hidden = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "template"}:
+            self.hidden += 1
+        if self.hidden:
+            return
+        if self.tag:
+            if tag == self.tag:
+                self.depth += 1
+            if tag == "br":
+                self.parts.append(" ")
+            return
+        targets = (dict(attrs).get("data-asoch-targets") or "").split()
+        if tag in {"adtitle", "description"} or (
+            tag in {"div", "span"} and {"ochTitle", "ochDescription", "ochHeadline", "ochAppName"}.intersection(targets)
+        ):
+            self.tag, self.depth = tag, 1
+            self.parts = []
+
+    def handle_data(self, data):
+        if self.tag and not self.hidden:
+            self.parts.append(data)
+
+    def handle_endtag(self, tag):
+        if self.hidden:
+            if tag in {"script", "style", "template"}:
+                self.hidden -= 1
+            return
+        if tag == self.tag:
+            self.depth -= 1
+            if not self.depth:
+                value = " ".join("".join(self.parts).split())
+                if value and not re.match(r"(?:https?:)?//", value, re.I) and value not in self.texts:
+                    self.texts.append(value[:4000])
+                self.tag = None
+
+
 class GoogleTransparencyWorker(BaseWorker):
     """通过 Google Ads Transparency 公开页面搜索广告主并提取素材卡片。"""
 
@@ -156,24 +226,34 @@ class GoogleTransparencyWorker(BaseWorker):
     _ADVERTISER_ID = re.compile(r"^AR\d{10,}$", re.IGNORECASE)
 
     async def run(self, payload: dict) -> WorkerResult:
-        """通过 Google Ads Transparency 公开网页搜索广告主，不调用 Google Ads API。"""
+        counts = Counter()
+        token = _run_counts.set(counts)
         keyword = str(payload.get("keyword") or "").strip()
+        rpc = self._is_advertiser_id(keyword)
+        result = None
+        try:
+            result = await self._run_atc(payload, keyword.upper()) if rpc else await self._search_web(payload, keyword)
+            return result
+        finally:
+            _run_counts.reset(token)
+            logger.info(
+                "Google 抓取汇总 runID=%s queryID=%s route=%s keyword=%s region=%s status=%s "
+                "候选=%d 窗口外=%s 已入库跳过=%d 预览请求=%d 预览失败=%d 预览成功但无内容=%d "
+                "无内容跳过=%d HTTP429=%d 冷却拦截=%d 返回=%d",
+                payload.get("runID"), payload.get("queryID"), "RPC" if rpc else "WEB", keyword,
+                self._resolve_region(payload), result.status.value if result else "INTERRUPTED",
+                counts["candidates"], counts["old"] if rpc else "网页端过滤", counts["known"],
+                counts["requests"], counts["failed"], counts["empty"], counts["skipped"],
+                counts["http429"], counts["cooldown"], len(result.items) if result else 0,
+            )
+
+    async def _search_web(self, payload: dict, keyword: str) -> WorkerResult:
         if not keyword:
             return WorkerResult(
                 status=JobStatus.FAILED,
                 errorCode="GOOGLE_ADVERTISER_REQUIRED",
                 errorMessage="必须提供 keyword",
             )
-
-        # 下一配置排队期间可能遇到上一配置触发的冷却，留足回传时间。
-        remaining = max(_cooldowns.values(), default=0) - time.monotonic()
-        if remaining > 0:
-            if remaining + 90 >= payload.get("_countryDeadline", 0) - asyncio.get_running_loop().time():
-                return self._limited_result([], "Google HTTP 429，等待下一轮抓取")
-            await asyncio.sleep(remaining)
-
-        if GoogleTransparencyWorker._is_advertiser_id(keyword):
-            return await self._run_atc(payload, keyword.upper())
 
         # Google 未填写国家/地区时使用 ANYWHERE；宿主按地区分别调用。
         region = GoogleTransparencyWorker._resolve_region(payload)
@@ -185,11 +265,7 @@ class GoogleTransparencyWorker(BaseWorker):
                 filters = {"region": region}
                 if payload.get("windowStart") and payload.get("windowEnd"):
                     filters.update({"start-date": payload["windowStart"][:10], "end-date": payload["windowEnd"][:10]})
-                await page.goto(
-                    "https://adstransparency.google.com/?" + urlencode(filters),
-                    wait_until="domcontentloaded",
-                    timeout=60000,
-                )
+                await _open_google_page(page, "https://adstransparency.google.com/?" + urlencode(filters), 60000)
                 await page.wait_for_timeout(int(payload.get("waitMs", 3000)))
                 inputs = page.locator("input[type='text']")
                 if not await inputs.count():
@@ -249,9 +325,13 @@ class GoogleTransparencyWorker(BaseWorker):
                             await asyncio.wait_for(self._load_delivery_regions(page.context, items), remaining)
                         except (asyncio.TimeoutError, PlaywrightError):
                             pass
+                        except _RateLimited as exc:
+                            limited = str(exc)
                 if limited:
                     return self._limited_result(items, limited)
                 return WorkerResult(fetchedCount=len(items), newCount=len(items), items=items)
+            except _RateLimited as exc:
+                return self._limited_result([], str(exc))
             except Exception as exc:  # noqa: BLE001 - 网页变化要回调明确错误
                 return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_BROWSER_EXCEPTION", errorMessage=str(exc)[:500])
             finally:
@@ -388,6 +468,15 @@ class GoogleTransparencyWorker(BaseWorker):
                 value = " ".join(match.group(1).split())
                 if value and value not in texts:
                     texts.append(value)
+        if re.search(r"data-asoch-targets|<AdTitle\b|<Description\b", decoded, re.I):
+            parser = _MarkedCopy()
+            markup = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", decoded, flags=re.S)
+            try:
+                parser.feed(markup.replace(r'\"', '"').replace(r"\'", "'"))
+                parser.close()
+            except (AssertionError, ValueError):
+                pass  # Malformed markup can coexist with usable JSON fields and media.
+            texts.extend(value for value in parser.texts if value not in texts)
         preview_text = "\n".join(texts[:20]) or None
         parsed = cls._parse_preview_text(preview_text)
         copy_text = "\n".join(texts[:10])[:4000] or None
@@ -442,9 +531,11 @@ class GoogleTransparencyWorker(BaseWorker):
                         if len(items) >= max_results or scanned >= self._ATC_MAX_CREATIVES:
                             break
                         scanned += 1
+                        _count("candidates")
                         timestamp = creative.get("7") or {}
                         last_shown = timestamp.get("1") if isinstance(timestamp, dict) else None
                         if since is not None and str(last_shown).isdigit() and int(last_shown) < since:
+                            _count("old")
                             continue
                         whole_page_old = False
                         creative_id = str(creative.get("2") or "").strip()
@@ -452,6 +543,7 @@ class GoogleTransparencyWorker(BaseWorker):
                             continue
                         seen_ids.add(creative_id)
                         if creative_id in known_ids:
+                            _count("known")
                             continue
                         preview_urls, preview, detail = await self._atc_preview_urls(client, advertiser_id, creative)
                         creative_url = f"https://adstransparency.google.com/advertiser/{advertiser_id}/creative/{creative_id}?region={region}"
@@ -462,21 +554,26 @@ class GoogleTransparencyWorker(BaseWorker):
                             try:
                                 host = urlsplit(preview_url).hostname
                                 async with _preview_slot(host):
+                                    _count("requests")
                                     response = await client.get(preview_url)
+                                    if not response.is_success:
+                                        _count("failed")
                                     if response.status_code == 429:
                                         logger.info("Google 预览限流 queryID=%s creativeID=%s", payload.get("queryID"), creative_id)
                                         _cool_down(host, response.headers.get("Retry-After"))
                                     if response.is_success:
                                         _consecutive_limits.pop(host, None)
-                                if response.is_success or response.status_code in (403, 429) or response.status_code >= 500:
-                                    preview_status = response.status_code
+                                preview_status = response.status_code
                                 if response.is_success:
                                     preview = self._parse_atc_preview(response.text)
                                     if _has_content(preview):
                                         break
+                                    _count("empty")
                             except httpx.HTTPError:
+                                _count("failed")
                                 preview_status = "network_error"
                         if not _has_content(preview):
+                            _count("skipped")
                             logger.info("跳过空素材 queryID=%s advertiserID=%s creativeID=%s previewStatus=%s", payload.get("queryID"), advertiser_id, creative_id, preview_status)
                             continue
                         detail_limit = None
@@ -497,7 +594,7 @@ class GoogleTransparencyWorker(BaseWorker):
                             "advertiserName": str(creative.get("12") or "") or None,
                             "region": region,
                             "regions": self._atc_regions(detail),
-                            "format": preview.get("mediaType"),
+                            "format": preview.get("mediaType") or ("TEXT" if preview.get("copyText") else None),
                             "title": preview.get("productName"),
                             "copyText": preview.get("copyText"),
                             "landingUrl": preview.get("landingUrl"),
@@ -555,8 +652,8 @@ class GoogleTransparencyWorker(BaseWorker):
                     continue
                 try:
                     global_url = urlsplit(url)._replace(query="region=anywhere", fragment="").geturl()
-                    response = await detail.goto(global_url, wait_until="domcontentloaded", timeout=12000)
-                    if response and response.status in (403, 429):
+                    response = await _open_google_page(detail, global_url, 12000)
+                    if response and response.status == 403:
                         break
                     if not response or not response.ok:
                         continue
@@ -605,6 +702,7 @@ class GoogleTransparencyWorker(BaseWorker):
         records: list[dict] = []
         skipped_known = False
         for index in range(min(scan_limit, GoogleTransparencyWorker._ATC_MAX_CREATIVES)):
+            _count("candidates")
             card = creatives.nth(index)
             label = await card.get_attribute("aria-label") or ""
             scripts = card.locator("script[src*='creativeId=']")
@@ -621,6 +719,7 @@ class GoogleTransparencyWorker(BaseWorker):
             else:
                 creative_id = linked_id.group(1)
             if known_ids and creative_id in known_ids:
+                _count("known")
                 skipped_known = True
                 continue
             if not creative_id:
@@ -686,6 +785,7 @@ class GoogleTransparencyWorker(BaseWorker):
                 if not preview.get("copyText") and preview.get("productName"):
                     preview["copyText"] = preview["productName"]
                 if not _has_content(dict(preview, mediaUrl=media_url, previewImageUrl=preview_image_url)):
+                    _count("skipped")
                     logger.info("跳过空素材 advertiserID=%s creativeID=%s", advertiser_id, record["creative_id"])
                     continue
                 platform_data = {
@@ -706,7 +806,7 @@ class GoogleTransparencyWorker(BaseWorker):
                     "advertiserID": advertiser_id,
                     "advertiserName": advertiser,
                     "region": region,
-                    "format": media_type,
+                    "format": media_type or ("TEXT" if preview.get("copyText") else None),
                     # 标准列用于 CMS 直接展示，完整预览文案仍保存在 platformData 中。
                     "title": preview["productName"],
                     "copyText": preview["copyText"],
@@ -898,23 +998,29 @@ class GoogleTransparencyWorker(BaseWorker):
         try:
             host = urlsplit(preview_script_url).hostname
             async with _preview_slot(host):
+                _count("requests")
                 response = await page.context.request.get(
                     preview_script_url,
                     headers={"Referer": page.url, "User-Agent": "Mozilla/5.0"},
                     timeout=timeout_ms,
                 )
                 if response.status == 429:
+                    _count("failed")
                     logger.info("Google 网页预览限流 host=%s", host)
                     _cool_down(host, response.headers.get("retry-after"))
                 if response.ok:
                     _consecutive_limits.pop(host, None)
             if not response.ok:
+                _count("failed")
                 return result
             result.update(GoogleTransparencyWorker._parse_atc_preview(await response.text()))
+            if not _has_content(result):
+                _count("empty")
         except _RateLimited as exc:
             result["rateLimit"] = str(exc)
         except Exception:
             # 预览签名过期或脚本请求被拦截时，仍保留 iframe 解析结果。
+            _count("failed")
             return result
         return result
 
