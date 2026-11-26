@@ -1,17 +1,129 @@
 import asyncio
 import html
 import json
+import logging
 import re
-from urllib.parse import quote, urlencode, urljoin
+import time
+from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit
 
 import httpx
 
 from playwright.async_api import Error as PlaywrightError, async_playwright
 
-from ...creative_fields import infer_function, infer_language
+from ...creative_fields import infer_function, infer_google_language, infer_language
 from ...models import JobStatus, WorkerResult
 from ...youtube_meta import enrich as enrich_youtube_metadata
 from ..base import BaseWorker
+from .geo import COUNTRY_CODES
+
+
+logger = logging.getLogger("uvicorn.error")
+
+
+class _RateLimited(RuntimeError):
+    """暂停同一主机的显式请求，下一次调度可以继续。"""
+
+
+_cooldowns: dict[str, float] = {}
+
+
+def _check_cooldown(host: str):
+    if _cooldowns.get(host, 0) > time.monotonic():
+        raise _RateLimited(f"{host} HTTP 429，等待冷却")
+
+
+def _cool_down(host: str, retry_after: str | None):
+    seconds = 30
+    if retry_after:
+        try:
+            seconds = int(retry_after)
+        except ValueError:
+            try:
+                seconds = parsedate_to_datetime(retry_after).timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError):
+                pass
+    _cooldowns[host] = max(_cooldowns.get(host, 0), time.monotonic() + max(1, seconds))
+    raise _RateLimited(f"{host} HTTP 429，等待 {max(1, int(seconds))} 秒")
+
+
+def _destination(href: str) -> str | None:
+    """Use an explicit ad destination, including one disclosed in a Google click URL."""
+    try:
+        link = urlsplit(href)
+        host = (link.hostname or "").lower()
+        tracking_domains = ("googleadservices.com", "doubleclick.net")
+        if any(host == d or host.endswith("." + d) for d in tracking_domains) or link.path == "/aclk":
+            href = next(iter(parse_qs(link.query).get("adurl", [])), "")
+            link = urlsplit(href)
+            host = (link.hostname or "").lower()
+        if link.scheme not in ("http", "https") or not host:
+            return None
+        if any(host == d or host.endswith("." + d) for d in (*tracking_domains, "example.com", "youradchoices.com")):
+            return None
+        if host in {"support.google.com", "adstransparency.google.com", "adssettings.google.com", "myadcenter.google.com"}:
+            return None
+        return href
+    except ValueError:
+        return None
+
+
+def _landing_url(source: str) -> str | None:
+    match = re.search(r"""["'](?:landingPageUrl|landingUrl|finalUrl)["']\s*:\s*["'](https?://[^"'<>\s]+)""", source, re.I)
+    if match:
+        destination = _destination(match.group(1))
+        if destination:
+            return destination
+    for click in re.finditer(r"""https?://[a-z0-9.-]+\.(?:googleadservices\.com|doubleclick\.net)/[^\s"'<>]+""", source, re.I):
+        destination = _destination(click.group())
+        if destination:
+            return destination
+    return None
+
+
+def _has_content(preview: dict) -> bool:
+    return any(str(preview.get(key) or "").strip() for key in (
+        "mediaUrl", "previewImageUrl", "youtubeVideoId", "copyText", "landingUrl",
+    ))
+
+
+class _InlineAd(HTMLParser):
+    """Read only visible ad text and links from an ATC inline HTML variant."""
+
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+        self.hidden = 0
+        self.image = None
+        self.landing = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "template"}:
+            self.hidden += 1
+        if self.hidden:
+            return
+        attrs = dict(attrs)
+        if tag == "img" and not self.image:
+            src = attrs.get("src") or ""
+            if re.match(r"^https://[a-z0-9.-]+\.(?:googlesyndication|googleusercontent|ytimg)\.com/", src, re.I):
+                self.image = src
+        if tag == "a" and not self.landing:
+            href = attrs.get("href") or ""
+            if re.match(r"^https?://[^/\s]+", href, re.I):
+                self.landing = _destination(href)
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style", "template"} and self.hidden:
+            self.hidden -= 1
+
+    def handle_data(self, data):
+        if not self.hidden and data.strip():
+            self.parts.append(" ".join(data.split()))
+
+    def fields(self):
+        return {"mediaUrl": self.image, "mediaType": "IMAGE" if self.image else ("TEXT" if self.parts else None),
+                "copyText": "\n".join(self.parts)[:4000] or None, "landingUrl": self.landing}
 
 
 class GoogleTransparencyWorker(BaseWorker):
@@ -95,11 +207,11 @@ class GoogleTransparencyWorker(BaseWorker):
                 script_timeout_ms = GoogleTransparencyWorker._parse_positive_int(
                     payload.get("scriptTimeoutMs"), 8000
                 )
-                items = await self._parse_creatives(page, max_results, region, script_timeout_ms)
-                if not items:
+                items, limited = await self._parse_creatives(page, max_results, region, script_timeout_ms)
+                if items is None:
                     return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_CREATIVES_UNREADABLE",
                                         errorMessage="Google 素材卡片未返回可识别的平台素材 ID")
-                if region == "ANYWHERE":
+                if items:
                     # 留出关闭浏览器、回传已采集素材的时间。
                     remaining = payload.get("_countryDeadline", asyncio.get_running_loop().time() + 900)
                     remaining -= asyncio.get_running_loop().time() + 5
@@ -108,6 +220,8 @@ class GoogleTransparencyWorker(BaseWorker):
                             await asyncio.wait_for(self._load_delivery_regions(page.context, items), remaining)
                         except (asyncio.TimeoutError, PlaywrightError):
                             pass
+                if limited:
+                    return self._limited_result(items, limited)
                 return WorkerResult(fetchedCount=len(items), newCount=len(items), items=items)
             except Exception as exc:  # noqa: BLE001 - 网页变化要回调明确错误
                 return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_BROWSER_EXCEPTION", errorMessage=str(exc)[:500])
@@ -120,12 +234,18 @@ class GoogleTransparencyWorker(BaseWorker):
         return bool(cls._ADVERTISER_ID.fullmatch(str(value or "").strip()))
 
     @classmethod
-    def _atc_search_payload(cls, advertiser_id: str, page_token: str | None = None) -> dict:
+    def _atc_search_payload(cls, advertiser_id: str, page_token: str | None = None, region: str = "ANYWHERE") -> dict:
         payload = {
             "2": cls._ATC_PAGE_SIZE,
             "3": {"12": {"1": "", "2": True}, "13": {"1": [advertiser_id]}},
             "7": {"1": 1, "2": 0, "3": cls._ATC_GEO},
         }
+        if region != "ANYWHERE":
+            geo = next((key for key, code in COUNTRY_CODES.items() if code == region), None)
+            if geo is None:
+                raise ValueError(f"Google ATC 不支持的地区：{region}")
+            payload["3"]["8"] = [geo]
+            payload["7"]["3"] = geo
         if page_token:
             payload["4"] = page_token
         return payload
@@ -136,6 +256,8 @@ class GoogleTransparencyWorker(BaseWorker):
         body = "f.req=" + quote(json.dumps(payload, separators=(",", ":")))
         last_error = "unknown"
         for attempt in range(3):
+            host = urlsplit(cls._ATC_RPC).hostname
+            _check_cooldown(host)
             try:
                 response = await client.post(
                     cls._ATC_RPC + method + "?authuser=",
@@ -157,39 +279,65 @@ class GoogleTransparencyWorker(BaseWorker):
                     return data
                 raise RuntimeError("ATC 返回结构异常")
             last_error = f"HTTP {response.status_code}"
-            if response.status_code == 429 and attempt < 2:
-                await asyncio.sleep(1.5 * (attempt + 1))
-                continue
+            if response.status_code == 429:
+                _cool_down(host, response.headers.get("Retry-After"))
             break
         raise RuntimeError(f"ATC {method} 失败：{last_error}")
 
     @classmethod
-    async def _atc_preview_urls(cls, client: httpx.AsyncClient, advertiser_id: str, item: dict) -> list[str]:
-        """读取搜索结果中的预览 URL，缺失时按创意 ID 查询详情。"""
-        urls: list[str] = []
-        creative = item.get("3") or {}
-        if isinstance(creative, dict):
-            first = creative.get("1") or {}
-            if isinstance(first, dict) and first.get("4"):
-                urls.append(str(first["4"]))
-        if urls:
-            return urls
-        creative_id = str(item.get("2") or "").strip()
-        if not creative_id:
-            return urls
+    async def _atc_detail(cls, client, advertiser_id, creative_id):
         try:
             data = await cls._atc_rpc(client, "LookupService/GetCreativeById", {
-                "1": advertiser_id,
-                "2": creative_id,
-                "5": {"1": 1, "2": 0, "3": cls._ATC_GEO},
+                "1": advertiser_id, "2": creative_id, "5": {"1": 1, "2": 0, "3": cls._ATC_GEO},
             })
-        except RuntimeError:
-            return urls
-        groups = (data.get("1") or {}).get("5") if isinstance(data.get("1"), dict) else []
-        for group in groups or []:
-            if isinstance(group, dict) and isinstance(group.get("1"), dict) and group["1"].get("4"):
-                urls.append(str(group["1"]["4"]))
-        return list(dict.fromkeys(urls))
+        except _RateLimited:
+            raise
+        except RuntimeError as exc:
+            logger.info("ATC 详情读取失败 advertiserID=%s creativeID=%s: %s", advertiser_id, creative_id, exc)
+            return {}
+        detail = data.get("1")
+        if isinstance(detail, dict) and detail.get("1") == advertiser_id and detail.get("2") == creative_id:
+            return detail
+        return {}
+
+    @staticmethod
+    def _atc_regions(detail):
+        codes = set()
+        for record in detail.get("17") or []:
+            criterion = str(record.get("1", "")) if isinstance(record, dict) else ""
+            if criterion.isascii() and criterion.isdecimal():
+                code = COUNTRY_CODES.get(int(criterion))
+                if code:
+                    codes.add(code)
+        return sorted(codes)
+
+    @classmethod
+    async def _atc_preview_urls(cls, client: httpx.AsyncClient, advertiser_id: str, item: dict) -> tuple[list[str], dict, dict | None]:
+        """ATC can return a preview script or inline HTML in both search and detail."""
+        def unpack(groups):
+            urls = []
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                script = (group.get("1") or {}).get("4")
+                if isinstance(script, str) and re.match(r"^https?://", script):
+                    urls.append(script)
+                markup = (group.get("3") or {}).get("2")
+                if isinstance(markup, str) and markup.strip():
+                    ad = _InlineAd()
+                    ad.feed(markup)
+                    ad.close()
+                    fields = ad.fields()
+                    if _has_content(fields):
+                        return urls, fields
+            return list(dict.fromkeys(urls)), {}
+
+        urls, preview = unpack([item.get("3")])
+        if urls or preview:
+            return urls, preview, None
+        detail = await cls._atc_detail(client, advertiser_id, str(item.get("2") or ""))
+        urls, preview = unpack(detail.get("5") or [])
+        return urls, preview, detail
 
     @classmethod
     def _parse_atc_preview(cls, source: str) -> dict[str, str | None]:
@@ -205,8 +353,8 @@ class GoogleTransparencyWorker(BaseWorker):
                 else:
                     package_name = " ".join(match.group(1).split())
         texts: list[str] = []
-        for field in ("headline", "description", "description1", "description2", "longHeadline", "title"):
-            for match in re.finditer(r"['\"]" + field + r"['\"]\s*:\s*['\"]([^'\"]{1,2000})", decoded, re.I):
+        for field in ("headline", "description", "description1", "description2", "shortDescription", "longHeadline", "title"):
+            for match in re.finditer(r"['\"]" + field + r"['\"]\s*:\s*(?:\[\s*)?['\"]([^'\"]{1,2000})", decoded, re.I):
                 value = " ".join(match.group(1).split())
                 if value and value not in texts:
                     texts.append(value)
@@ -215,17 +363,18 @@ class GoogleTransparencyWorker(BaseWorker):
         copy_text = "\n".join(texts[:10])[:4000] or None
         video_id = cls._extract_youtube_video_id(decoded)
         video_match = re.search(r"(?:(?:https?:)?//)[^\"'<>\s]+googlevideo\.com/videoplayback\?[^\"'<>\s]+", decoded, re.I)
-        image_match = re.search(r"(?:(?:https?:)?//)(?:i\d+\.ytimg\.com|tpc\.googlesyndication\.com/simgad/|lh\d+\.googleusercontent\.com)/[^\"'<>\s]+", decoded, re.I)
+        image_match = re.search(r"(?:(?:https?:)?//)(?:i\d*\.ytimg\.com/|tpc\.googlesyndication\.com/simgad/|lh\d+\.googleusercontent\.com/)[^\"'<>\s]+", decoded, re.I)
         media_url = cls._normalize_media_url(video_match.group(0).rstrip("])")) if video_match else None
         image_url = cls._normalize_media_url(image_match.group(0).rstrip("])")) if image_match else None
         return {
             "previewText": preview_text,
+            "landingUrl": _landing_url(decoded),
             "productName": app_name or parsed["productName"],
             "packageName": package_name or parsed["packageName"],
             "copyText": copy_text or parsed["copyText"],
-            "mediaUrl": media_url or image_url,
+            "mediaUrl": media_url if video_id else (media_url or image_url),
             "previewImageUrl": image_url,
-            "mediaType": "VIDEO" if media_url else ("IMAGE" if image_url else None),
+            "mediaType": "VIDEO" if media_url or video_id else ("IMAGE" if image_url else None),
             "youtubeVideoId": video_id,
         }
 
@@ -241,32 +390,48 @@ class GoogleTransparencyWorker(BaseWorker):
         timeout = httpx.Timeout(self._parse_positive_int(payload.get("requestTimeoutMs"), 30000) / 1000)
         items: list[dict] = []
         token = ""
-        scanned = 0
+        seen_ids: set[str] = set()
+        seen_tokens: set[str] = set()
         try:
             async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
-                while scanned < max_results:
-                    data = await self._atc_rpc(client, "SearchService/SearchCreatives", self._atc_search_payload(advertiser_id, token))
+                while len(items) < max_results:
+                    data = await self._atc_rpc(client, "SearchService/SearchCreatives", self._atc_search_payload(advertiser_id, token, region))
                     page = data.get("1") or []
                     if not page:
                         break
                     for creative in page:
-                        if scanned >= max_results:
+                        if len(items) >= max_results:
                             break
-                        scanned += 1
                         creative_id = str(creative.get("2") or "").strip()
-                        if not creative_id:
+                        if not creative_id or creative_id in seen_ids:
                             continue
-                        preview_urls = await self._atc_preview_urls(client, advertiser_id, creative)
-                        preview = {}
+                        seen_ids.add(creative_id)
+                        preview_urls, preview, detail = await self._atc_preview_urls(client, advertiser_id, creative)
+                        creative_url = f"https://adstransparency.google.com/advertiser/{advertiser_id}/creative/{creative_id}?region={region}"
+                        preview_status = None
                         for preview_url in preview_urls:
+                            if _has_content(preview):
+                                break
                             try:
+                                host = urlsplit(preview_url).hostname
+                                _check_cooldown(host)
                                 response = await client.get(preview_url)
+                                if response.status_code == 429:
+                                    logger.info("Google 预览限流 queryID=%s creativeID=%s", payload.get("queryID"), creative_id)
+                                    _cool_down(host, response.headers.get("Retry-After"))
+                                if response.is_success or response.status_code in (403, 429) or response.status_code >= 500:
+                                    preview_status = response.status_code
                                 if response.is_success:
                                     preview = self._parse_atc_preview(response.text)
-                                    if preview.get("mediaUrl") or preview.get("youtubeVideoId") or preview.get("copyText"):
+                                    if _has_content(preview):
                                         break
                             except httpx.HTTPError:
-                                continue
+                                preview_status = "network_error"
+                        if not _has_content(preview):
+                            logger.info("跳过空素材 queryID=%s advertiserID=%s creativeID=%s previewStatus=%s", payload.get("queryID"), advertiser_id, creative_id, preview_status)
+                            continue
+                        if detail is None:
+                            detail = await self._atc_detail(client, advertiser_id, creative_id)
                         creative_text = " ".join(filter(None, [
                             preview.get("previewText"), preview.get("productName"), preview.get("copyText")
                         ]))
@@ -277,48 +442,51 @@ class GoogleTransparencyWorker(BaseWorker):
                             "advertiserID": advertiser_id,
                             "advertiserName": str(creative.get("12") or "") or None,
                             "region": region,
-                            "format": preview.get("mediaType") or "UNKNOWN",
+                            "regions": self._atc_regions(detail),
+                            "format": preview.get("mediaType"),
                             "title": preview.get("productName"),
                             "copyText": preview.get("copyText"),
-                            "creativeUrl": f"https://adstransparency.google.com/advertiser/{advertiser_id}/creative/{creative_id}?region={region}",
+                            "landingUrl": preview.get("landingUrl"),
+                            "creativeUrl": creative_url,
                             "sourceUrl": f"https://adstransparency.google.com/advertiser/{advertiser_id}?region={region}",
                             "mediaUrl": preview.get("mediaUrl"),
                             "previewImageUrl": preview.get("previewImageUrl"),
                             "youtubeVideoId": preview.get("youtubeVideoId"),
                             "creativeFunction": self._infer_function(creative_text),
-                            "language": self._infer_language(creative_text),
                             "platformData": {
                                 "source": "ATC_RPC",
                                 "creativeId": creative_id,
                                 "lastShown": creative.get("7"),
                                 "previewUrls": preview_urls,
+                                "previewStatus": preview_status,
                                 "previewText": preview.get("previewText"),
                                 "packageName": preview.get("packageName"),
                             },
                         }
                         items.append(item)
                     token = str(data.get("2") or "")
-                    if not token or len(page) < self._ATC_PAGE_SIZE:
+                    if not token or token in seen_tokens:
                         break
-            items = await enrich_youtube_metadata(items)
-            for item in items:
-                if not item.get("creativeFunction"):
-                    item["creativeFunction"] = self._infer_function(" ".join(filter(None, [
-                        item.get("title"), item.get("copyText"), item.get("youtubeTitle")
-                    ])))
-                if not item.get("language"):
-                    item["language"] = self._infer_language(" ".join(filter(None, [
-                        item.get("title"), item.get("copyText"), item.get("youtubeTitle")
-                    ])))
-            if not items:
+                    seen_tokens.add(token)
+            items = await self._enrich_items(items)
+            if not seen_ids:
                 return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_CREATIVES_UNREADABLE", errorMessage=f"ATC 未解析到广告主素材：{advertiser_id}")
             return WorkerResult(fetchedCount=len(items), newCount=len(items), items=items)
+        except _RateLimited as exc:
+            items = await self._enrich_items(items)
+            return self._limited_result(items, str(exc))
         except (RuntimeError, httpx.HTTPError) as exc:
             return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_ATC_REQUEST_FAILED", errorMessage=str(exc)[:500])
 
     @staticmethod
+    def _limited_result(items, message):
+        return WorkerResult(status=JobStatus.PARTIAL_SUCCESS if items else JobStatus.FAILED,
+                            items=items, fetchedCount=len(items), newCount=len(items),
+                            errorCode="GOOGLE_RATE_LIMITED", errorMessage=message, restrictionType="RATE_LIMITED")
+
+    @staticmethod
     async def _load_delivery_regions(context, items):
-        """全球查询只读取单条广告详情中可见的展示地区菜单。"""
+        """读取素材详情的完整展示地区，独立于本次搜索的国家范围。"""
         detail = await context.new_page()
         try:
             for item in items:
@@ -326,7 +494,8 @@ class GoogleTransparencyWorker(BaseWorker):
                 if not re.match(r"^https://adstransparency\.google\.com/advertiser/AR[0-9]+/creative/CR[0-9]+", url):
                     continue
                 try:
-                    response = await detail.goto(url, wait_until="domcontentloaded", timeout=12000)
+                    global_url = urlsplit(url)._replace(query="region=anywhere", fragment="").geturl()
+                    response = await detail.goto(global_url, wait_until="domcontentloaded", timeout=12000)
                     if response and response.status in (403, 429):
                         break
                     if not response or not response.ok:
@@ -334,22 +503,21 @@ class GoogleTransparencyWorker(BaseWorker):
                     await detail.locator("creative-region-filter [role=button]:visible").first.click(timeout=5000)
                     options = detail.locator("material-select-item[role=option]:visible")
                     await options.first.wait_for(timeout=3000)
-                    codes = await options.evaluate_all("""options => {
+                    codes = await options.evaluate_all("""(options, countryCodes) => {
                         const names = new Map();
                         for (const locale of ['en', 'zh-CN', 'zh-TW', 'zh-HK', document.documentElement.lang || 'en']) {
                             const display = new Intl.DisplayNames(locale, {type:'region', fallback:'none'});
-                            for (let i=0; i<676; i++) {
-                                const code = String.fromCharCode(65 + Math.floor(i/26), 65 + i%26);
+                            for (const code of countryCodes) {
                                 const name = display.of(code);
                                 if (name && !['EU','UN','EZ','ZZ'].includes(code)) names.set(name, code);
                             }
                         }
                         for (const [name, code] of Object.entries({
                             '大韓民國':'KR', '香港':'HK', '澳门':'MO', '澳門':'MO', '台湾':'TW',
-                            '波斯尼亚 黑塞哥维那':'BA'
+                            '波斯尼亚 黑塞哥维那':'BA', '刚果':'CG', '刚果民主共和国':'CD', '马达加斯加岛':'MG'
                         })) names.set(name, code);
                         return [...new Set(options.map(el => names.get(el.innerText.trim())).filter(Boolean))].sort();
-                    }""")
+                    }""", sorted(set(COUNTRY_CODES.values())))
                     if codes:
                         item["regions"] = codes
                 except PlaywrightError:
@@ -360,7 +528,7 @@ class GoogleTransparencyWorker(BaseWorker):
     @staticmethod
     async def _parse_creatives(
         page, max_results: int | None, region: str, script_timeout_ms: int
-    ) -> list[dict]:
+    ) -> tuple[list[dict] | None, str | None]:
         """从素材卡片的无障碍标签、预览脚本和嵌套广告 iframe 提取素材。"""
         advertiser = ""
         current_name = page.locator(".advertiser-name.current-scope")
@@ -371,9 +539,7 @@ class GoogleTransparencyWorker(BaseWorker):
         result: list[dict] = []
         seen_external_ids: set[str] = set()
         creatives = page.locator("creative")
-        creative_links = page.locator("a[href*='/creative/']")
         creative_count = await creatives.count()
-        link_count = await creative_links.count()
         # 前几条视频经常只有预览脚本没有可下载地址，向后多扫描一些卡片，避免结果页全部没有素材。
         scan_limit = creative_count if max_results is None else min(creative_count, max(max_results * 20, max_results))
         records: list[dict] = []
@@ -385,6 +551,14 @@ class GoogleTransparencyWorker(BaseWorker):
             creative_match = re.search(r"[?&]creativeId=(\d+)", src or "")
             version_match = re.search(r"[?&]versionId=(\d+)", src or "")
             creative_id = creative_match.group(1) if creative_match else None
+            card_link = card.locator("xpath=ancestor-or-self::a[contains(@href, '/creative/')] | .//a[contains(@href, '/creative/')]").first
+            href = await card_link.get_attribute("href") if await card_link.count() else None
+            detail_url = urljoin(page.url, href) if href else None
+            linked_id = re.match(r"^https://adstransparency\.google\.com/advertiser/AR[0-9]+/creative/(CR[0-9]+)(?:[/?#]|$)", detail_url or "")
+            if not linked_id:
+                detail_url = None
+            elif not creative_id:
+                creative_id = linked_id.group(1)
             if not creative_id:
                 # 排序位置会变化，不能用作跨广告主共享的素材唯一键。
                 continue
@@ -393,8 +567,6 @@ class GoogleTransparencyWorker(BaseWorker):
                 continue
             seen_external_ids.add(creative_id)
             card_text = (await card.inner_text()).lower()
-            detail_href = await creative_links.nth(index).get_attribute("href") if index < link_count else None
-            detail_url = urljoin(page.url, detail_href) if detail_href else None
             records.append({
                 "card": card,
                 "label": label,
@@ -406,17 +578,20 @@ class GoogleTransparencyWorker(BaseWorker):
                 "has_video_icon": await card.locator("[icon='videocam']").count() > 0,
             })
 
+        if not records:
+            return None, None  # 卡片结构无法识别，与已识别但内容全部为空分别处理。
         # 预览脚本请求彼此独立，限制并发后可以避免逐卡等待失效 URL。
-        semaphore = asyncio.Semaphore(8)
-
         async def extract(record: dict) -> dict:
-            async with semaphore:
-                return await GoogleTransparencyWorker._extract_preview(
-                    page, record["card"], record["src"], script_timeout_ms
-                )
+            return await GoogleTransparencyWorker._extract_preview(
+                page, record["card"], record["src"], script_timeout_ms
+            )
 
-        for start in range(0, len(records), 8):
-            batch = records[start:start + 8]
+        batch_size = min(max_results or 2, 2)
+        limited = None
+        for start in range(0, len(records), batch_size):
+            if limited or (max_results and len(result) >= max_results):
+                break
+            batch = records[start:start + batch_size]
             previews = await asyncio.gather(*(extract(record) for record in batch), return_exceptions=True)
             for record, preview in zip(batch, previews):
                 if isinstance(preview, Exception):
@@ -430,14 +605,23 @@ class GoogleTransparencyWorker(BaseWorker):
                         "copyText": None,
                         "youtubeVideoId": None,
                     }
+                limited = preview.get("rateLimit") or limited
                 is_video = (
                     preview["mediaType"] == "VIDEO"
+                    or bool(preview["youtubeVideoId"])
                     or "videocam" in record["card_text"]
                     or record["has_video_icon"]
                 )
                 media_type = "VIDEO" if is_video else preview["mediaType"]
                 media_url = GoogleTransparencyWorker._normalize_media_url(preview["mediaUrl"])
                 preview_image_url = GoogleTransparencyWorker._normalize_media_url(preview["previewImageUrl"])
+                if is_video and media_url == preview_image_url:
+                    media_url = None
+                if not preview.get("copyText") and preview.get("productName"):
+                    preview["copyText"] = preview["productName"]
+                if not _has_content(dict(preview, mediaUrl=media_url, previewImageUrl=preview_image_url)):
+                    logger.info("跳过空素材 advertiserID=%s creativeID=%s", advertiser_id, record["creative_id"])
+                    continue
                 platform_data = {
                     "versionId": record["version_id"],
                     "cardLabel": record["label"],
@@ -456,42 +640,40 @@ class GoogleTransparencyWorker(BaseWorker):
                     "advertiserID": advertiser_id,
                     "advertiserName": advertiser,
                     "region": region,
-                    "format": media_type or "UNKNOWN",
+                    "format": media_type,
                     # 标准列用于 CMS 直接展示，完整预览文案仍保存在 platformData 中。
                     "title": preview["productName"],
                     "copyText": preview["copyText"],
                     "versionId": record["version_id"],
                     "cardLabel": record["label"],
-                    "creativeUrl": record["detail_url"] or (
-                        f"https://adstransparency.google.com/advertiser/{advertiser_id}/creative/{record['creative_id']}?region={region}"
-                        if advertiser_id else None
-                    ),
+                    "creativeUrl": record["detail_url"],
                     "sourceUrl": page.url,
                     "previewScriptUrl": record["src"],
                     "mediaUrl": media_url,
+                    "previewImageUrl": preview_image_url,
+                    "landingUrl": preview.get("landingUrl"),
                     "youtubeVideoId": preview["youtubeVideoId"],
                     "creativeFunction": GoogleTransparencyWorker._infer_function(
                         " ".join(filter(None, [preview["previewText"], preview["productName"], preview["copyText"], record["label"]]))
-                    ),
-                    # 页面卡片标签可能是当前界面的中文控件文案，不能作为素材语言依据。
-                    "language": GoogleTransparencyWorker._infer_language(
-                        " ".join(filter(None, [preview["previewText"], preview["productName"], preview["copyText"]]))
                     ),
                     "platformData": platform_data,
                 }
                 result.append(item)
         selected = result if max_results is None else result[:max_results]
-        selected = await enrich_youtube_metadata(selected)
-        for item in selected:
+        return await GoogleTransparencyWorker._enrich_items(selected), limited
+
+    @staticmethod
+    async def _enrich_items(items):
+        items = await enrich_youtube_metadata(items)
+        for item in items:
             if not item.get("creativeFunction"):
                 item["creativeFunction"] = GoogleTransparencyWorker._infer_function(
                     " ".join(filter(None, [item.get("title"), item.get("copyText"), item.get("youtubeTitle")]))
                 )
             if not item.get("language"):
-                item["language"] = GoogleTransparencyWorker._infer_language(
-                    " ".join(filter(None, [item.get("title"), item.get("copyText"), item.get("youtubeTitle")]))
-                )
-        return selected
+                ad_text = " ".join(filter(None, [item.get("title"), item.get("copyText")]))
+                item["language"] = infer_google_language(item.get("youtubeTitle"), ad_text)
+        return items
 
     @staticmethod
     def _parse_max_results(value: object) -> int | None:
@@ -596,38 +778,43 @@ class GoogleTransparencyWorker(BaseWorker):
             for content_frame in frames:
                 body = content_frame.locator("body")
                 body_text = (await body.inner_text()).strip()
-                if body_text and not result["previewText"]:
+                if body_text and not result["copyText"]:
                     result["previewText"] = body_text[:2000]
                     parsed = GoogleTransparencyWorker._parse_preview_text(result["previewText"])
-                    result["productName"] = parsed["productName"]
-                    result["packageName"] = parsed["packageName"]
+                    result["productName"] = parsed["productName"] or result["productName"]
+                    result["packageName"] = parsed["packageName"] or result["packageName"]
                     result["copyText"] = parsed["copyText"]
 
+                if not result.get("landingUrl"):
+                    links = await content_frame.locator("a[href]").evaluate_all("els => els.map(el => el.href)")
+                    result["landingUrl"] = next((dest for href in links if (dest := _destination(href))), None)
                 videos = content_frame.locator("video")
-                sources = content_frame.locator("video media, media")
+                sources = content_frame.locator("video source[src], video media[src], media[src]")
                 images = content_frame.locator("img")
                 video_url = None
                 if await videos.count():
-                    video_url = await videos.first.get_attribute("src")
+                    video_url = GoogleTransparencyWorker._normalize_media_url(await videos.first.get_attribute("src"))
                     result["mediaType"] = "VIDEO"
                     result["youtubeVideoId"] = result["youtubeVideoId"] or GoogleTransparencyWorker._extract_youtube_video_id(video_url)
-                    if not video_url:
-                        video_url = await videos.first.get_attribute("poster")
+                    poster = GoogleTransparencyWorker._normalize_media_url(await videos.first.get_attribute("poster"))
+                    if poster:
+                        result["previewImageUrl"] = poster
+                        result["youtubeVideoId"] = result["youtubeVideoId"] or GoogleTransparencyWorker._extract_youtube_video_id(poster)
                 if not video_url and await sources.count():
-                    video_url = await sources.first.get_attribute("src")
+                    video_url = GoogleTransparencyWorker._normalize_media_url(await sources.first.get_attribute("src"))
                     if video_url:
                         result["mediaType"] = "VIDEO"
                         result["youtubeVideoId"] = result["youtubeVideoId"] or GoogleTransparencyWorker._extract_youtube_video_id(video_url)
                 if await images.count():
                     image_url = await images.first.get_attribute("src")
                     if image_url:
-                        result["previewImageUrl"] = image_url
+                        result["previewImageUrl"] = result["previewImageUrl"] or image_url
                         result["youtubeVideoId"] = result["youtubeVideoId"] or GoogleTransparencyWorker._extract_youtube_video_id(image_url)
                         if not video_url and result["mediaType"] is None:
                             result["mediaType"] = "IMAGE"
                 if video_url and (not result["mediaUrl"] or script_media_type != "VIDEO"):
                     result["mediaUrl"] = video_url
-                elif result["previewImageUrl"] and not result["mediaUrl"]:
+                elif result["mediaType"] == "IMAGE" and not result["mediaUrl"]:
                     result["mediaUrl"] = result["previewImageUrl"]
         except Exception:
             # 单个广告的预览 iframe 可能被浏览器阻断，不能因此丢弃整页其他素材。
@@ -643,38 +830,21 @@ class GoogleTransparencyWorker(BaseWorker):
         if not preview_script_url:
             return result
         try:
+            host = urlsplit(preview_script_url).hostname
+            _check_cooldown(host)
             response = await page.context.request.get(
                 preview_script_url,
                 headers={"Referer": page.url, "User-Agent": "Mozilla/5.0"},
                 timeout=timeout_ms,
             )
+            if response.status == 429:
+                logger.info("Google 网页预览限流 host=%s", host)
+                _cool_down(host, response.headers.get("retry-after"))
             if not response.ok:
                 return result
-            source = await response.text()
-            source = GoogleTransparencyWorker._decode_preview_script(source)
-            result["youtubeVideoId"] = GoogleTransparencyWorker._extract_youtube_video_id(source)
-            video_match = re.search(
-                r"//[^\"'\s<>]+googlevideo\.com/videoplayback\?[^\"'\s<>]+",
-                source,
-                re.IGNORECASE,
-            )
-            image_matches = re.findall(
-                r"(?:(?:https?:)?//)(?:i\d+\.ytimg\.com|tpc\.googlesyndication\.com/simgad/|lh\d+\.googleusercontent\.com)/[^\"'\s<>]+",
-                source,
-                re.IGNORECASE,
-            )
-            if video_match:
-                result["mediaUrl"] = GoogleTransparencyWorker._normalize_media_url(
-                    video_match.group(0).rstrip("]")
-                )
-                result["mediaType"] = "VIDEO"
-            if image_matches:
-                preferred_image = next(
-                    (url for url in image_matches if "ytimg.com" in url or "/simgad/" in url),
-                    image_matches[0],
-                )
-                image_url = re.split(r"\);|,", preferred_image, maxsplit=1)[0]
-                result["previewImageUrl"] = GoogleTransparencyWorker._normalize_media_url(image_url)
+            result.update(GoogleTransparencyWorker._parse_atc_preview(await response.text()))
+        except _RateLimited as exc:
+            result["rateLimit"] = str(exc)
         except Exception:
             # 预览签名过期或脚本请求被拦截时，仍保留 iframe 解析结果。
             return result
@@ -689,6 +859,8 @@ class GoogleTransparencyWorker(BaseWorker):
             text,
             re.IGNORECASE,
         )
+        if not match:
+            match = re.search(r"""(?:^|[\s"'(=])/(?:vi|vi_webp)/([A-Za-z0-9_-]{11})/""", text)
         return match.group(1) if match else None
 
     @staticmethod

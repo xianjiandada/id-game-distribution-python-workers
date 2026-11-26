@@ -52,29 +52,45 @@ def infer_language(text: str | None) -> str | None:
         return "ru"
     if re.search(r"[\u0600-\u06ff]", value):
         return "ar"
-    if re.search(r"[áéíóúñ¿¡]", value, re.IGNORECASE):
-        return "es"
-    if re.search(r"[ãõçà]", value, re.IGNORECASE):
+    if re.search(r"[ãõ]|\b(segurança|antivírus)\b", value, re.IGNORECASE):
         return "pt"
+    if re.search(r"[ñ¿¡]", value, re.IGNORECASE):
+        return "es"
     if re.search(
-        r"\b(archivos|fotos|datos|eliminados|eliminadas|recuperar|restaurar|"
+        r"\b(archivos|datos|eliminados|eliminadas|"
         r"limpiar|limpieza|espacio|almacenamiento|basura)\b",
         value,
         re.IGNORECASE,
     ):
         return "es"
     if re.search(
-        r"\b(arquivos|limpeza|espaço|espaco|celular|memória|memoria|"
-        r"liberar|limpador|recuperar|restaurar)\b",
+        r"\b(arquivos|limpeza|espaço|espaco|memória|limpador)\b",
         value,
         re.IGNORECASE,
     ):
         return "pt"
-    # 参考 ATC 项目仅对成句文案兜底英文，避免把产品名或控件误判为英语。
-    if (len(re.findall(r"[A-Za-z]{3,}", value)) >= 2
+    if re.search(r"\b(fichiers|supprimés|récupérer|nettoyage)\b", value, re.IGNORECASE):
+        return "fr"
+    if (re.search(r"\b(the|with|your|from|and|files?|photos?|recover|recovery|deleted|cleaner|clean|"
+                  r"phone|tracker|security|control|volume|remove|sweep|storage|backup|restore)\b", value, re.I)
+            and len(set(re.findall(r"\b[a-z]{3,}\b", value.lower()))) >= 2
             and not re.search(r"\b(install|sponsored|learn more|downloads)\b", value, re.IGNORECASE)):
         return "en"
     return None
+
+
+def infer_google_language(title: str | None, ad_text: str | None) -> str | None:
+    """广告文件名中的语言码可用作补充，普通标题继续按文案判断。"""
+    title = title or ""
+    if re.search(r"\d", title) and re.search(r"[-_.]|\b\d+x\d+\b", title, re.I):
+        code = re.search(r"(?:^|[-_.\s])(en|es|pt|th|vi|id|ar|ja|jp|ko|zh|cn|tw|fr|de|it|ru|tr|hi)"
+                         r"(?=$|[-_.\s])", title, re.I)
+        if code:
+            value = code.group(1).lower()
+            return {"cn": "zh", "tw": "zh", "jp": "ja"}.get(value, value)
+        if "_" in title or re.search(r"\.(mp4|mov|webm)$", title, re.I):
+            return infer_language(ad_text)
+    return infer_language(ad_text) or infer_language(title)
 
 
 def infer_function(text: str | None) -> str | None:

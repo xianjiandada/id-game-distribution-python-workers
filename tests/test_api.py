@@ -105,7 +105,8 @@ async def test_query_context_is_kept_in_callback_and_items():
 
 
 @pytest.mark.asyncio
-async def test_configured_creative_function_overrides_worker_value():
+@pytest.mark.parametrize("configured", ["文件恢复", None])
+async def test_configured_creative_function_overrides_worker_value(configured):
     """查询配置中的素材分类应覆盖 Worker 自动推断值并随回调返回。"""
     app = create_app()
     app.state.registry.register(MockWorker())
@@ -118,7 +119,8 @@ async def test_configured_creative_function_overrides_worker_value():
                 "worker": "mock",
                 "runID": 101,
                 "payload": {
-                    "creativeFunction": "文件恢复",
+                    "queryID": 7,
+                    **({"creativeFunction": configured} if configured else {}),
                     "items": [{"externalAdID": "category-1", "creativeFunction": "清理"}],
                 },
             },
@@ -128,7 +130,7 @@ async def test_configured_creative_function_overrides_worker_value():
             if callback.payloads:
                 break
             await asyncio.sleep(0.01)
-    assert callback.payloads[0].items[0]["creativeFunction"] == "文件恢复"
+    assert callback.payloads[0].items[0]["creativeFunction"] == configured
 
 
 @pytest.mark.asyncio

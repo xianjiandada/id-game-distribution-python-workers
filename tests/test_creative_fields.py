@@ -2,6 +2,7 @@
 
 from app.workers.google_transparency.worker import GoogleTransparencyWorker
 from app.workers.meta_library.worker import MetaLibraryWorker
+from app.creative_fields import infer_google_language
 
 
 def test_google_preview_extracts_product_and_description() -> None:
@@ -49,6 +50,26 @@ def test_language_uses_youtube_title_after_metadata_enrichment() -> None:
 def test_google_infers_function_from_ad_copy() -> None:
     assert GoogleTransparencyWorker._infer_function("Recover deleted photos") == "文件恢复"
     assert GoogleTransparencyWorker._infer_function("Phone cleaner and junk remover") == "清理"
+
+
+def test_google_language_uses_ad_evidence_and_explicit_video_codes():
+    assert infer_google_language(None, "Apex Clean:Segurança Antivírus") == "pt"
+    assert infer_google_language("IO1542-ar 28", "Restore your photos") == "ar"
+    assert infer_google_language("SC_NS_247_BanSamsung_V16_9x16_PT", "") == "pt"
+    assert infer_google_language("0614 W 7", "") is None
+    assert infer_google_language("EDIT_DRAFT_247.mp4", "") is None
+
+
+def test_google_preview_decodes_explicit_destination_and_keeps_thumbnail_separate():
+    parse = GoogleTransparencyWorker._parse_atc_preview
+    preview = parse("https://www.googleadservices.com/pagead/aclk?adurl="
+                    "https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.example.app "
+                    "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg")
+    assert preview["landingUrl"] == "https://play.google.com/store/apps/details?id=com.example.app"
+    assert preview["mediaType"] == "VIDEO" and preview["mediaUrl"] is None
+    assert preview["previewImageUrl"].endswith("/hqdefault.jpg")
+    assert parse("https://www.googleadservices.com/pagead/aclk?x=1")["landingUrl"] is None
+    assert parse('{"landingUrl":"https://support.google.com/ads"}')["landingUrl"] is None
 
 
 def test_google_advertiser_id_uses_atc_shape() -> None:

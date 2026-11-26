@@ -93,9 +93,9 @@ class JobService:
             normalized.setdefault("keyword", job.keyword)
             normalized.setdefault("media", job.media)
             configured_function = job.payload.get("creativeFunction")
-            # 查询配置是运营明确指定的分类，始终覆盖 Worker 的自动推断结果。
-            if configured_function:
-                normalized["creativeFunction"] = configured_function
+            # 配置任务使用派发时的分类快照，留空也覆盖平台推断值。
+            if job.queryID is not None or "creativeFunction" in job.payload:
+                normalized["creativeFunction"] = configured_function or None
             # 内容指纹忽略查询上下文，避免同一素材被不同搜索词发现时误判为内容更新。
             normalized.setdefault("contentHash", _content_hash(normalized))
             job.items.append(normalized)
