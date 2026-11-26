@@ -1,11 +1,17 @@
+import asyncio
+import json
+import logging
 import re
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 
-from playwright.async_api import async_playwright
+from playwright.async_api import Error as BrowserError, async_playwright
 
 from ...creative_fields import infer_function, infer_language
 from ...models import JobStatus, WorkerResult
 from ..base import BaseWorker
+from .public_ad import apply_sponsors, apply_transparency, enrich_card, index_ads, json_documents, play_listing
+
+logger = logging.getLogger(__name__)
 
 
 class MetaLibraryWorker(BaseWorker):
@@ -19,13 +25,52 @@ class MetaLibraryWorker(BaseWorker):
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=True)
             page = await browser.new_page(locale="en-US")
+            search_responses = []
+
+            def remember_search(response):
+                if "AdLibrarySearch" in (response.request.post_data or ""):
+                    search_responses.append(response)
+
+            page.on("response", remember_search)
             try:
                 # Meta 可能返回 403，但仍然把公开结果渲染在页面中，不能只看 HTTP 状态。
                 response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 await page.wait_for_timeout(int(payload.get("waitMs", 5000)))
                 max_results = MetaLibraryWorker._parse_max_results(payload.get("maxResults"))
                 await MetaLibraryWorker._load_more_cards(page, max_results, int(payload.get("waitMs", 5000)))
-                items = await self._parse_cards(page, max_results, payload)
+                ads = {}
+                for script in await page.locator('script[type="application/json"]').all_text_contents():
+                    if 'ad_archive_id' in script:
+                        for document in json_documents(script):
+                            index_ads(document, ads)
+                for response_page in search_responses:
+                    try:
+                        for document in json_documents(await response_page.text()):
+                            index_ads(document, ads)
+                    except BrowserError:
+                        logger.debug("Meta 翻页响应无法读取，继续解析页面卡片")
+                items = await self._parse_cards(page, max_results, payload, ads)
+                listings = {}
+                for item in items:
+                    deadline = payload.get("_countryDeadline")
+                    if deadline and deadline - asyncio.get_running_loop().time() < 10:
+                        break
+                    await self._read_transparency(page, item)
+                    meta = item["platformData"]
+                    package = meta.get("landingAppID")
+                    if package and re.fullmatch(r"[\w.]+", package, re.ASCII) and urlsplit(item.get("landingUrl") or "").hostname == "play.google.com":
+                        if package not in listings:
+                            listings[package] = None
+                            try:
+                                listing = await page.request.get("https://play.google.com/store/apps/details",
+                                    params={"id": package, "hl": "en", "gl": "US"}, timeout=4000)
+                                if listing.ok:
+                                    listings[package] = play_listing(await listing.text(), package)
+                                await listing.dispose()
+                            except BrowserError:
+                                logger.info("Google Play 暂未返回应用资料 %s", package)
+                        if listings[package]:
+                            meta["googlePlay"] = listings[package]
                 if items:
                     return WorkerResult(fetchedCount=len(items), newCount=len(items), items=items)
 
@@ -61,12 +106,21 @@ class MetaLibraryWorker(BaseWorker):
             "sort_data[direction]": "desc",
         }
         keyword = payload.get("keyword") or payload.get("q")
-        if keyword:
+        page_id = MetaLibraryWorker._page_id(payload)
+        if page_id:
+            params.update(view_all_page_id=page_id, search_type="page")
+        elif keyword:
             params["q"] = keyword
         return "https://www.facebook.com/ads/library/?" + urlencode(params)
 
     @staticmethod
-    async def _parse_cards(page, max_results: int | None, payload: dict) -> list[dict]:
+    def _page_id(payload):
+        value = str(payload.get("advertiserID") or payload.get("keyword") or "").strip()
+        match = re.fullmatch(r"(?:page:)?([0-9]{5,25})", value, re.I)
+        return match.group(1) if match else None
+
+    @staticmethod
+    async def _parse_cards(page, max_results: int | None, payload: dict, ads=None) -> list[dict]:
         """读取语义文本和链接，避免依赖 Meta 会变化的随机 CSS class。"""
         cards = page.get_by_text("Library ID:", exact=False)
         items: list[dict] = []
@@ -130,9 +184,6 @@ class MetaLibraryWorker(BaseWorker):
                     "platformData": {
                         "libraryId": external_id,
                         "startedText": started,
-                        "activeStatus": payload.get("activeStatus", "active"),
-                        "adType": payload.get("adType", "all"),
-                        "mediaType": payload.get("mediaType", "all"),
                         "advertiserUrl": hrefs[0] if hrefs else None,
                         "landingUrl": hrefs[1] if len(hrefs) > 1 else None,
                         "mediaUrl": video_url or (media_urls[-1] if media_urls else None),
@@ -144,9 +195,47 @@ class MetaLibraryWorker(BaseWorker):
                     "sourceUrl": page.url,
                 }
             )
+            enrich_card(items[-1], (ads or {}).get(external_id, {}))
+            page_id = MetaLibraryWorker._page_id(payload)
+            if page_id and str(items[-1].get("advertiserID") or "") != page_id:
+                items.pop()
+                continue
             if max_results is not None and len(items) >= max_results:
                 break
         return items
+
+    @staticmethod
+    async def _read_transparency(page, item):
+        ad_id = item["externalAdID"]
+        label = page.get_by_text(f"Library ID: {ad_id}", exact=True).first
+        button = label.locator("xpath=ancestor::div[.//div[normalize-space()='See ad details']][1]").get_by_text("See ad details", exact=True)
+
+        def matches(response):
+            form = parse_qs(response.request.post_data or "")
+            if form.get("fb_api_req_friendly_name") != ["AdLibraryV3AdDetailsQuery"]:
+                return False
+            try:
+                return str(json.loads(form.get("variables", ["{}"])[0]).get("adArchiveID")) == ad_id
+            except ValueError:
+                return False
+
+        try:
+            async with page.expect_response(matches, timeout=4500) as pending:
+                await button.click(timeout=2500)
+            response = await pending.value
+            for document in json_documents(await response.text()):
+                details = ((document.get("data") or {}).get("ad_library_main") or {}).get("ad_details") or {}
+                apply_transparency(item, details.get("transparency_by_location") or {})
+                apply_sponsors(item, details)
+        except BrowserError:
+            logger.info("Meta 广告 %s 未取得地区透明度详情，保留卡片字段", ad_id)
+        finally:
+            close = page.get_by_role("dialog").get_by_role("button", name="Close", exact=True).first
+            if await close.count():
+                try:
+                    await close.click(timeout=1500)
+                except BrowserError:
+                    await page.keyboard.press("Escape")
 
     @staticmethod
     def _parse_started_date(value: str) -> str | None:

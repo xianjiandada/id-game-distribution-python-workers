@@ -42,6 +42,10 @@ def infer_language(text: str | None) -> str | None:
             "中文": "zh",
             "汉语": "zh",
         }[named.group(1).lower()]
+    for script, language in ((r"[\u0a95-\u0ab9]", "gu"), (r"[\u0c15-\u0c39]", "te"),
+                             (r"[\u0995-\u09b9]", "bn")):
+        if len(re.findall(script, value)) >= 3:
+            return language
     if re.search(r"[\u3040-\u30ff]", value):
         return "ja"
     if re.search(r"[\uac00-\ud7af]", value):
