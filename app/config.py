@@ -31,6 +31,7 @@ class Settings:
     job_timeout_seconds: int = _int_env("JOB_TIMEOUT_SECONDS", 900)
     # 同时执行的最大任务数，避免浏览器和出口连接过载。
     max_concurrent_jobs: int = _int_env("MAX_CONCURRENT_JOBS", 2)
+    google_preview_interval_seconds: int = max(1, _int_env("GOOGLE_PREVIEW_INTERVAL_SECONDS", 2))
     # Python 本地审计数据库路径。
     database_path: str = os.getenv("DATABASE_PATH", "data/worker.db")
 

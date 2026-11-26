@@ -4,6 +4,8 @@ import json
 import logging
 import re
 import time
+from contextlib import asynccontextmanager
+from datetime import datetime
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit
@@ -13,6 +15,7 @@ import httpx
 from playwright.async_api import Error as PlaywrightError, async_playwright
 
 from ...creative_fields import infer_function, infer_google_language, infer_language
+from ...config import settings
 from ...models import JobStatus, WorkerResult
 from ...youtube_meta import enrich as enrich_youtube_metadata
 from ..base import BaseWorker
@@ -27,6 +30,19 @@ class _RateLimited(RuntimeError):
 
 
 _cooldowns: dict[str, float] = {}
+_consecutive_limits: dict[str, int] = {}
+_preview_locks: dict[str, asyncio.Lock] = {}
+_next_preview: dict[str, float] = {}
+
+
+@asynccontextmanager
+async def _preview_slot(host: str):
+    async with _preview_locks.setdefault(host, asyncio.Lock()):
+        _check_cooldown(host)
+        await asyncio.sleep(max(0, _next_preview.get(host, 0) - time.monotonic()))
+        _check_cooldown(host)
+        _next_preview[host] = time.monotonic() + settings.google_preview_interval_seconds
+        yield
 
 
 def _check_cooldown(host: str):
@@ -35,7 +51,9 @@ def _check_cooldown(host: str):
 
 
 def _cool_down(host: str, retry_after: str | None):
-    seconds = 30
+    count = min(5, _consecutive_limits.get(host, 0) + 1)
+    _consecutive_limits[host] = count
+    seconds = 60 * 2 ** (count - 1)
     if retry_after:
         try:
             seconds = int(retry_after)
@@ -147,6 +165,13 @@ class GoogleTransparencyWorker(BaseWorker):
                 errorMessage="必须提供 keyword",
             )
 
+        # 下一配置排队期间可能遇到上一配置触发的冷却，留足回传时间。
+        remaining = max(_cooldowns.values(), default=0) - time.monotonic()
+        if remaining > 0:
+            if remaining + 90 >= payload.get("_countryDeadline", 0) - asyncio.get_running_loop().time():
+                return self._limited_result([], "Google HTTP 429，等待下一轮抓取")
+            await asyncio.sleep(remaining)
+
         if GoogleTransparencyWorker._is_advertiser_id(keyword):
             return await self._run_atc(payload, keyword.upper())
 
@@ -157,8 +182,11 @@ class GoogleTransparencyWorker(BaseWorker):
             context = await browser.new_context(locale="zh-CN")
             page = await context.new_page()
             try:
+                filters = {"region": region}
+                if payload.get("windowStart") and payload.get("windowEnd"):
+                    filters.update({"start-date": payload["windowStart"][:10], "end-date": payload["windowEnd"][:10]})
                 await page.goto(
-                    "https://adstransparency.google.com/?" + urlencode({"region": region}),
+                    "https://adstransparency.google.com/?" + urlencode(filters),
                     wait_until="domcontentloaded",
                     timeout=60000,
                 )
@@ -203,11 +231,12 @@ class GoogleTransparencyWorker(BaseWorker):
                         errorMessage=f"广告主已找到，但没有加载素材: {keyword}",
                     )
                 max_results = GoogleTransparencyWorker._parse_max_results(payload.get("maxResults"))
-                await GoogleTransparencyWorker._load_more_creatives(page, max_results, int(payload.get("resultWaitMs", 6000)))
+                await GoogleTransparencyWorker._load_more_creatives(page, min(max_results or 500, 500), int(payload.get("resultWaitMs", 6000)))
                 script_timeout_ms = GoogleTransparencyWorker._parse_positive_int(
                     payload.get("scriptTimeoutMs"), 8000
                 )
-                items, limited = await self._parse_creatives(page, max_results, region, script_timeout_ms)
+                items, limited = await self._parse_creatives(page, max_results, region, script_timeout_ms,
+                                                            set(payload.get("knownCreativeIDs") or []))
                 if items is None:
                     return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_CREATIVES_UNREADABLE",
                                         errorMessage="Google 素材卡片未返回可识别的平台素材 ID")
@@ -271,6 +300,7 @@ class GoogleTransparencyWorker(BaseWorker):
                     continue
                 raise RuntimeError(f"ATC 请求失败：{last_error}") from exc
             if response.status_code == 200:
+                _consecutive_limits.pop(host, None)
                 try:
                     data = response.json()
                 except ValueError as exc:
@@ -392,20 +422,37 @@ class GoogleTransparencyWorker(BaseWorker):
         token = ""
         seen_ids: set[str] = set()
         seen_tokens: set[str] = set()
+        known_ids = set(payload.get("knownCreativeIDs") or [])
+        since = datetime.fromisoformat(payload["windowStart"].replace("Z", "+00:00")).timestamp() if payload.get("windowStart") else None
+        scanned = 0
+        deadline = payload.get("_countryDeadline", float("inf"))
+        time_limited = False
         try:
             async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
-                while len(items) < max_results:
+                while len(items) < max_results and scanned < self._ATC_MAX_CREATIVES:
                     data = await self._atc_rpc(client, "SearchService/SearchCreatives", self._atc_search_payload(advertiser_id, token, region))
                     page = data.get("1") or []
                     if not page:
                         break
+                    whole_page_old = since is not None
                     for creative in page:
-                        if len(items) >= max_results:
+                        if asyncio.get_running_loop().time() + 90 >= deadline:
+                            time_limited = True
                             break
+                        if len(items) >= max_results or scanned >= self._ATC_MAX_CREATIVES:
+                            break
+                        scanned += 1
+                        timestamp = creative.get("7") or {}
+                        last_shown = timestamp.get("1") if isinstance(timestamp, dict) else None
+                        if since is not None and str(last_shown).isdigit() and int(last_shown) < since:
+                            continue
+                        whole_page_old = False
                         creative_id = str(creative.get("2") or "").strip()
                         if not creative_id or creative_id in seen_ids:
                             continue
                         seen_ids.add(creative_id)
+                        if creative_id in known_ids:
+                            continue
                         preview_urls, preview, detail = await self._atc_preview_urls(client, advertiser_id, creative)
                         creative_url = f"https://adstransparency.google.com/advertiser/{advertiser_id}/creative/{creative_id}?region={region}"
                         preview_status = None
@@ -414,11 +461,13 @@ class GoogleTransparencyWorker(BaseWorker):
                                 break
                             try:
                                 host = urlsplit(preview_url).hostname
-                                _check_cooldown(host)
-                                response = await client.get(preview_url)
-                                if response.status_code == 429:
-                                    logger.info("Google 预览限流 queryID=%s creativeID=%s", payload.get("queryID"), creative_id)
-                                    _cool_down(host, response.headers.get("Retry-After"))
+                                async with _preview_slot(host):
+                                    response = await client.get(preview_url)
+                                    if response.status_code == 429:
+                                        logger.info("Google 预览限流 queryID=%s creativeID=%s", payload.get("queryID"), creative_id)
+                                        _cool_down(host, response.headers.get("Retry-After"))
+                                    if response.is_success:
+                                        _consecutive_limits.pop(host, None)
                                 if response.is_success or response.status_code in (403, 429) or response.status_code >= 500:
                                     preview_status = response.status_code
                                 if response.is_success:
@@ -430,8 +479,13 @@ class GoogleTransparencyWorker(BaseWorker):
                         if not _has_content(preview):
                             logger.info("跳过空素材 queryID=%s advertiserID=%s creativeID=%s previewStatus=%s", payload.get("queryID"), advertiser_id, creative_id, preview_status)
                             continue
+                        detail_limit = None
                         if detail is None:
-                            detail = await self._atc_detail(client, advertiser_id, creative_id)
+                            try:
+                                detail = await self._atc_detail(client, advertiser_id, creative_id)
+                            except _RateLimited as exc:
+                                detail = {}
+                                detail_limit = exc
                         creative_text = " ".join(filter(None, [
                             preview.get("previewText"), preview.get("productName"), preview.get("copyText")
                         ]))
@@ -464,12 +518,18 @@ class GoogleTransparencyWorker(BaseWorker):
                             },
                         }
                         items.append(item)
+                        if detail_limit:
+                            raise detail_limit
                     token = str(data.get("2") or "")
-                    if not token or token in seen_tokens:
+                    if time_limited or whole_page_old or not token or token in seen_tokens:
                         break
                     seen_tokens.add(token)
             items = await self._enrich_items(items)
-            if not seen_ids:
+            if time_limited:
+                return WorkerResult(status=JobStatus.PARTIAL_SUCCESS if items else JobStatus.TIMEOUT, items=items,
+                                    fetchedCount=len(items), newCount=len(items), errorCode="GOOGLE_SCAN_TIME_BUDGET",
+                                    errorMessage="已达到本次抓取时间预算")
+            if scanned and not seen_ids and not whole_page_old:
                 return WorkerResult(status=JobStatus.FAILED, errorCode="GOOGLE_CREATIVES_UNREADABLE", errorMessage=f"ATC 未解析到广告主素材：{advertiser_id}")
             return WorkerResult(fetchedCount=len(items), newCount=len(items), items=items)
         except _RateLimited as exc:
@@ -527,7 +587,7 @@ class GoogleTransparencyWorker(BaseWorker):
 
     @staticmethod
     async def _parse_creatives(
-        page, max_results: int | None, region: str, script_timeout_ms: int
+        page, max_results: int | None, region: str, script_timeout_ms: int, known_ids=None
     ) -> tuple[list[dict] | None, str | None]:
         """从素材卡片的无障碍标签、预览脚本和嵌套广告 iframe 提取素材。"""
         advertiser = ""
@@ -543,7 +603,8 @@ class GoogleTransparencyWorker(BaseWorker):
         # 前几条视频经常只有预览脚本没有可下载地址，向后多扫描一些卡片，避免结果页全部没有素材。
         scan_limit = creative_count if max_results is None else min(creative_count, max(max_results * 20, max_results))
         records: list[dict] = []
-        for index in range(scan_limit):
+        skipped_known = False
+        for index in range(min(scan_limit, GoogleTransparencyWorker._ATC_MAX_CREATIVES)):
             card = creatives.nth(index)
             label = await card.get_attribute("aria-label") or ""
             scripts = card.locator("script[src*='creativeId=']")
@@ -557,8 +618,11 @@ class GoogleTransparencyWorker(BaseWorker):
             linked_id = re.match(r"^https://adstransparency\.google\.com/advertiser/AR[0-9]+/creative/(CR[0-9]+)(?:[/?#]|$)", detail_url or "")
             if not linked_id:
                 detail_url = None
-            elif not creative_id:
+            else:
                 creative_id = linked_id.group(1)
+            if known_ids and creative_id in known_ids:
+                skipped_known = True
+                continue
             if not creative_id:
                 # 排序位置会变化，不能用作跨广告主共享的素材唯一键。
                 continue
@@ -579,6 +643,8 @@ class GoogleTransparencyWorker(BaseWorker):
             })
 
         if not records:
+            if skipped_known:
+                return [], None
             return None, None  # 卡片结构无法识别，与已识别但内容全部为空分别处理。
         # 预览脚本请求彼此独立，限制并发后可以避免逐卡等待失效 URL。
         async def extract(record: dict) -> dict:
@@ -831,15 +897,17 @@ class GoogleTransparencyWorker(BaseWorker):
             return result
         try:
             host = urlsplit(preview_script_url).hostname
-            _check_cooldown(host)
-            response = await page.context.request.get(
-                preview_script_url,
-                headers={"Referer": page.url, "User-Agent": "Mozilla/5.0"},
-                timeout=timeout_ms,
-            )
-            if response.status == 429:
-                logger.info("Google 网页预览限流 host=%s", host)
-                _cool_down(host, response.headers.get("retry-after"))
+            async with _preview_slot(host):
+                response = await page.context.request.get(
+                    preview_script_url,
+                    headers={"Referer": page.url, "User-Agent": "Mozilla/5.0"},
+                    timeout=timeout_ms,
+                )
+                if response.status == 429:
+                    logger.info("Google 网页预览限流 host=%s", host)
+                    _cool_down(host, response.headers.get("retry-after"))
+                if response.ok:
+                    _consecutive_limits.pop(host, None)
             if not response.ok:
                 return result
             result.update(GoogleTransparencyWorker._parse_atc_preview(await response.text()))
