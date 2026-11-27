@@ -61,16 +61,46 @@ def _text(value):
 def enrich_card(item, ad):
     snapshot = ad.get("snapshot") or {}
     meta = item["platformData"]
+    cards = [row for row in snapshot.get("cards") or [] if isinstance(row, dict)]
+    # 视频优先于图片；页面上可能只有封面，或者 video.src 是临时的 blob 地址。
+    for kind, group, keys in (
+        ("VIDEO", "videos", ("video_hd_url", "video_sd_url")),
+        ("IMAGE", "images", ("original_image_url", "resized_image_url")),
+    ):
+        if kind == "IMAGE" and item.get("mediaType") == "VIDEO":
+            break
+        rows = [row for row in snapshot.get(group) or [] if isinstance(row, dict)]
+        for row in [*rows, *cards]:
+            media = next((row[key] for key in keys if isinstance(row.get(key), str)
+                          and row[key].startswith(("https://", "http://"))), None)
+            if media:
+                item.update(mediaType=kind, mediaUrl=media)
+                meta["mediaUrl"] = media
+                break
+        else:
+            continue
+        break
+    # 轮播的某条视频也可能出现在顶层 videos 中，按实际选中的 URL 找回对应卡片。
+    media_url = item.get("mediaUrl")
+    card = next((row for row in cards if media_url and any(
+        row.get(key) == media_url for key in ("video_hd_url", "video_sd_url", "original_image_url", "resized_image_url")
+    )), {})
+    if not card and (not media_url or len(cards) == 1):
+        card = cards[0] if cards else {}
     for field, value in {
         "advertiserID": ad.get("page_id") or snapshot.get("page_id"),
         "advertiserName": snapshot.get("page_name"), "advertiserUrl": snapshot.get("page_profile_uri"),
-        "copyText": _text(snapshot.get("body")), "title": _text(snapshot.get("title")),
-        "description": _text(snapshot.get("link_description")),
+        "copyText": _text(snapshot.get("body")) or _text(card.get("body")),
+        "title": _text(snapshot.get("title")) or _text(card.get("title")),
+        "description": _text(snapshot.get("link_description")) or _text(card.get("link_description")),
         "platforms": ad.get("publisher_platform"),
     }.items():
         if value:
             item[field] = value
-    url, app_id = landing_page(snapshot.get("link_url") or item.get("landingUrl"))
+    for candidate in (card.get("link_url"), snapshot.get("link_url"), item.get("landingUrl")):
+        url, app_id = landing_page(_text(candidate))
+        if url:
+            break
     if url:
         item["landingUrl"] = url
     item["language"] = infer_language(item.get("copyText")) or infer_language(item.get("title"))

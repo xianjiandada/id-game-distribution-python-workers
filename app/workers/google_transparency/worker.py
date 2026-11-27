@@ -463,9 +463,24 @@ class GoogleTransparencyWorker(BaseWorker):
                 else:
                     package_name = " ".join(match.group(1).split())
         texts: list[str] = []
+        # Google 文字广告组件把标题、描述、展示域名依次放入 data-p。
+        # 仅取前两项；展示域名可能与点击后的落地页不同。
+        for marker in re.finditer(r"""\bdata-p=["']%\.@\.\[1,\s*""", decoded):
+            try:
+                fields, _ = json.JSONDecoder().raw_decode(decoded[marker.end():])
+            except ValueError:
+                continue
+            if isinstance(fields, list):
+                for field in fields[:2]:
+                    if isinstance(field, str) and field.strip() and field.strip() not in texts:
+                        texts.append(field.strip())
         for field in ("headline", "description", "description1", "description2", "shortDescription", "longHeadline", "title"):
-            for match in re.finditer(r"['\"]" + field + r"['\"]\s*:\s*(?:\[\s*)?['\"]([^'\"]{1,2000})", decoded, re.I):
-                value = " ".join(match.group(1).split())
+            pattern = (rf"""['"]{field}['"]\s*:\s*(?:\[\s*)?"""
+                       r"""(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)')""")
+            for match in re.finditer(pattern, decoded, re.I):
+                quoted = match.group(1) if match.group(1) is not None else match.group(2)
+                value = re.sub(r"""\\(['"\\])""", r"\1", quoted)
+                value = " ".join(value.split())[:2000]
                 if value and value not in texts:
                     texts.append(value)
         if re.search(r"data-asoch-targets|<AdTitle\b|<Description\b", decoded, re.I):

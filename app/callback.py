@@ -42,3 +42,6 @@ class JavaCallbackClient:
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(url, json=payload.model_dump(mode="json"), headers=headers)
             response.raise_for_status()
+            receipt = response.json()
+            if not isinstance(receipt, dict) or receipt.get("code") not in ("ACCEPTED", "DUPLICATE"):
+                raise ValueError("Manager 回调应答缺少成功处理码")

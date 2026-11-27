@@ -66,10 +66,12 @@ Invoke-RestMethod http://127.0.0.1:13371/workers
 需要自动重载时，在项目根目录运行（仅用于开发，重载会丢失内存任务）：
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --env-file .env --reload --host 127.0.0.1 --port 13371
+.\.venv\Scripts\python.exe -m app --env-file .env --reload
 ```
 
 ### 常见启动问题
+
+本地运行日志写入 `logs/YYYY-MM-DD/sf_worker/sf_worker_info.log`，错误同时写入同目录的 `sf_worker_error.log`。可按 Manager 的 `runID` 或抓取配置的 `queryID` 查任务。生产目录和查询命令见[部署说明](docs/部署上线.md#61-面板状态api-和日志)。
 
 | 现象 | 处理 |
 | --- | --- |

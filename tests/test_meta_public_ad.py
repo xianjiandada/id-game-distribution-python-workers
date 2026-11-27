@@ -4,6 +4,38 @@ from app.workers.meta_library.worker import MetaLibraryWorker
 from urllib.parse import parse_qs, urlsplit
 
 
+def test_carousel_video_and_copy_from_same_card_replace_dom_thumbnail():
+    item = {"platformData": {}, "mediaType": "IMAGE", "mediaUrl": "https://cdn.example/thumb"}
+    enrich_card(item, {"snapshot": {"body": "{{product.name}}", "cards": [
+        {"original_image_url": "https://cdn.example/image", "title": "First"},
+        {"video_hd_url": "https://cdn.example/hd", "video_sd_url": "https://cdn.example/sd",
+         "body": {"text": "Play today"}, "title": "Second", "link_url": "https://example.org/play"},
+    ]}})
+    assert (item["mediaType"], item["mediaUrl"]) == ("VIDEO", "https://cdn.example/hd")
+    assert item["platformData"]["mediaUrl"] == item["mediaUrl"]
+    assert (item["copyText"], item["title"], item["landingUrl"]) == ("Play today", "Second", "https://example.org/play")
+
+
+def test_snapshot_image_fallback_preserves_dom_video():
+    snapshot = {"images": [{"original_image_url": "https://cdn.example/image"}]}
+    item = {"platformData": {}, "mediaType": "VIDEO", "mediaUrl": "https://cdn.example/video"}
+    enrich_card(item, {"snapshot": snapshot})
+    assert item["mediaUrl"] == "https://cdn.example/video"
+    image = {"platformData": {}}
+    enrich_card(image, {"snapshot": snapshot})
+    assert (image["mediaType"], image["mediaUrl"]) == ("IMAGE", "https://cdn.example/image")
+
+
+def test_video_uses_matching_carousel_card_for_copy_and_landing_page():
+    video = "https://cdn.example/second.mp4"
+    item = {"platformData": {}}
+    enrich_card(item, {"snapshot": {"videos": [{"video_sd_url": video}], "cards": [
+        {"body": "First", "link_url": "https://first.example"},
+        {"body": "Second", "video_sd_url": video, "link_url": "https://second.example"},
+    ]}})
+    assert (item["mediaUrl"], item["copyText"], item["landingUrl"]) == (video, "Second", "https://second.example")
+
+
 def test_page_search_and_keyword_search_use_different_public_urls():
     def params(keyword):
         return parse_qs(urlsplit(MetaLibraryWorker._build_url({"keyword": keyword})).query)

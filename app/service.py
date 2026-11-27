@@ -3,14 +3,18 @@
 import asyncio
 import hashlib
 import json
+import logging
 from uuid import uuid4
 
+from .alerts import alert_callback_failure
 from .callback import CallbackSender
 from .config import Settings
 from .models import CallbackPayload, JobStatus, JobSubmitRequest, JobView, WorkerResult, utc_now
 from .storage import JobStore
 from .registry import WorkerRegistry
 from .workers.countries import collect_countries
+
+logger = logging.getLogger(__name__)
 
 
 class JobService:
@@ -59,6 +63,7 @@ class JobService:
         job = self.jobs[job_id]
         job.status = JobStatus.RUNNING
         job.startedAt = utc_now()
+        logger.info("开始任务 runID=%s queryID=%s jobID=%s worker=%s", job.runID, job.queryID, job.jobID, job.worker)
         try:
             async with self.semaphore:
                 worker = self.registry.get(job.worker)
@@ -76,6 +81,9 @@ class JobService:
             try:
                 await self._callback(job)
             finally:
+                level = logging.ERROR if job.status in (JobStatus.FAILED, JobStatus.TIMEOUT) else logging.INFO
+                logger.log(level, "结束任务 runID=%s queryID=%s jobID=%s worker=%s status=%s fetchedCount=%s errorCode=%s",
+                           job.runID, job.queryID, job.jobID, job.worker, job.status.value, job.fetchedCount, job.errorCode)
                 self.store.save_finished(job)
 
     @staticmethod
@@ -132,8 +140,11 @@ class JobService:
         try:
             await self.callback.send(payload, self.callback_urls.get(job.jobID))
         except Exception as exc:  # 回调失败不覆盖原始 Worker 结果
+            logger.error("回调失败 runID=%s queryID=%s jobID=%s exception=%s",
+                         job.runID, job.queryID, job.jobID, type(exc).__name__)
             job.errorCode = job.errorCode or "CALLBACK_FAILED"
             job.errorMessage = job.errorMessage or str(exc)[:500]
+            await alert_callback_failure(self.settings, job, exc)
 
 
 def _content_hash(item: dict) -> str:

@@ -25,6 +25,7 @@ class Settings:
     app_env: str = os.getenv("APP_ENV", "local")
     # Java Manager 回调基础地址，不包含具体 runID。
     java_callback_base_url: str = os.getenv("JAVA_CALLBACK_BASE_URL", "")
+    feishu_alert_webhook: str = os.getenv("FEISHU_ALERT_WEBHOOK", "")
     # Java 回调的 HTTP 超时时间，单位为秒。
     callback_timeout_seconds: int = _int_env("CALLBACK_TIMEOUT_SECONDS", 1800)
     # 单个网页 Worker 的最大执行时间，单位为秒。

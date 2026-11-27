@@ -8,6 +8,20 @@ from app.models import JobStatus
 from app.workers.google_transparency.worker import GoogleTransparencyWorker
 
 
+def test_text_renderer_attribute_preserves_copy_and_ignores_display_domain():
+    source = (r'<c-wiz data-p\x3d\x22%.@.[1,[\x26quot;Find your files\x26quot;,'
+              r'\x26quot;Photos \x26amp; videos\x26quot;,\x26quot;example.com\x26quot;,null]]\x22>')
+    preview = GoogleTransparencyWorker._parse_atc_preview(source)
+    assert preview["copyText"] == "Find your files\nPhotos & videos"
+    assert preview["landingUrl"] is None
+
+
+def test_quoted_preview_copy_keeps_apostrophes_and_escaped_quotes():
+    body = r'''{"headline":"L'été en famille","description":"Try \"Restore\" today"}'''
+    preview = GoogleTransparencyWorker._parse_atc_preview(body)
+    assert preview["copyText"] == """L'été en famille\nTry "Restore" today"""
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status,expected_code", [(200, "GOOGLE_SEARCH_INPUT_UNAVAILABLE"), (429, "GOOGLE_RATE_LIMITED")])
 async def test_company_search_can_open_during_preview_cooldown(monkeypatch, status, expected_code):

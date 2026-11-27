@@ -7,11 +7,14 @@ from pathlib import Path
 import uvicorn
 from dotenv import load_dotenv
 
+from .worker_logging import worker_log_config
+
 
 def main(argv: list[str] | None = None) -> None:
     """加载选定配置后启动服务；系统环境变量优先于文件配置。"""
     parser = argparse.ArgumentParser(description="启动 Python Worker 服务")
     parser.add_argument("--env-file", type=Path, help="指定配置文件，例如 production.env；默认读取 .env")
+    parser.add_argument("--reload", action="store_true", help="开发时自动重载")
     args = parser.parse_args(argv)
     if args.env_file is not None:
         if not args.env_file.is_file():
@@ -24,6 +27,8 @@ def main(argv: list[str] | None = None) -> None:
         host=os.getenv("HOST", "127.0.0.1"),
         port=int(os.getenv("PORT", "13371")),
         workers=1,
+        reload=args.reload,
+        log_config=worker_log_config(),
     )
 
 

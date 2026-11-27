@@ -24,9 +24,10 @@ def test_explicit_config_does_not_merge_local_env(tmp_path, monkeypatch):
     monkeypatch.setattr("app.__main__.uvicorn.run", capture_run)
     main(["--env-file", str(production)])
 
+    assert "daily" in captured.pop("log_config")["loggers"]["uvicorn"]["handlers"]
     assert captured == {
         "app": "app.main:app", "host": "127.0.0.1", "port": 13371,
-        "workers": 1, "environment": "production",
+        "workers": 1, "environment": "production", "reload": False,
     }
     assert "JAVA_CALLBACK_BASE_URL" not in os.environ
 
